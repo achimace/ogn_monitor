@@ -3,14 +3,19 @@
  *
  * Dark mode, large display, designed for tower controller readability.
  * Connects via WebSocket for real-time delta updates.
+ *
+ * Views: Table | Map | Split (table left, map right)
  */
 import { useParams } from 'react-router-dom'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useMonitorStore } from '../store/monitorStore'
 import FlightTable from '../components/FlightTable'
+import MapView from '../components/MapView'
 import ConnectionStatus from '../components/ConnectionStatus'
 import AlarmBanner from '../components/AlarmBanner'
 import { useEffect, useState } from 'react'
+
+type ViewMode = 'table' | 'map' | 'split'
 
 export default function MonitorPage() {
   const { slug } = useParams<{ slug: string }>()
@@ -18,6 +23,7 @@ export default function MonitorPage() {
   const stats = useMonitorStore((s) => s.stats)
   const setSlug = useMonitorStore((s) => s.setSlug)
   const [clock, setClock] = useState(utcNow())
+  const [view, setView] = useState<ViewMode>('table')
 
   // Set slug and connect WebSocket
   useEffect(() => {
@@ -35,9 +41,9 @@ export default function MonitorPage() {
   const allFlights = Array.from(flights.values())
 
   return (
-    <div className="min-h-screen bg-tower-bg text-gray-100">
+    <div className="min-h-screen bg-tower-bg text-gray-100 flex flex-col">
       {/* Header */}
-      <header className="bg-tower-surface border-b border-tower-border px-6 py-3">
+      <header className="bg-tower-surface border-b border-tower-border px-6 py-3 shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <h1 className="text-lg font-bold text-white">
@@ -51,7 +57,14 @@ export default function MonitorPage() {
               {stats.outlanding > 0 && <StatPill label="Aussen" value={stats.outlanding} color="text-orange-400" />}
             </div>
           </div>
-          <div className="flex items-center gap-6">
+
+          <div className="flex items-center gap-4">
+            {/* View toggle */}
+            <div className="flex bg-tower-bg rounded-lg border border-tower-border overflow-hidden">
+              <ViewButton label="Tabelle" active={view === 'table'} onClick={() => setView('table')} />
+              <ViewButton label="Karte" active={view === 'map'} onClick={() => setView('map')} />
+              <ViewButton label="Split" active={view === 'split'} onClick={() => setView('split')} />
+            </div>
             <ConnectionStatus />
             <div className="text-gray-400 font-mono text-sm">{clock} UTC</div>
           </div>
@@ -59,18 +72,55 @@ export default function MonitorPage() {
       </header>
 
       {/* Main content */}
-      <div className="p-4 max-w-[1600px] mx-auto">
-        <AlarmBanner />
-        <FlightTable flights={allFlights} />
+      <div className="flex-1 flex flex-col min-h-0">
+        <div className="p-4 shrink-0">
+          <AlarmBanner />
+        </div>
+
+        {view === 'table' && (
+          <div className="flex-1 overflow-auto px-4 pb-12">
+            <FlightTable flights={allFlights} />
+          </div>
+        )}
+
+        {view === 'map' && (
+          <div className="flex-1 px-4 pb-12">
+            <MapView flights={allFlights} />
+          </div>
+        )}
+
+        {view === 'split' && (
+          <div className="flex-1 flex gap-4 px-4 pb-12 min-h-0">
+            <div className="w-1/2 overflow-auto">
+              <FlightTable flights={allFlights} />
+            </div>
+            <div className="w-1/2">
+              <MapView flights={allFlights} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Disclaimer footer */}
-      <footer className="fixed bottom-0 left-0 right-0 bg-tower-surface/80 backdrop-blur border-t border-tower-border py-1.5 text-center">
+      <footer className="fixed bottom-0 left-0 right-0 bg-tower-surface/80 backdrop-blur border-t border-tower-border py-1.5 text-center z-10">
         <p className="text-gray-600 text-xs">
           Assistenzsystem - ersetzt nicht die Pflichten des Flugleiters
         </p>
       </footer>
     </div>
+  )
+}
+
+function ViewButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+        active ? 'bg-tower-qdr text-white' : 'text-gray-400 hover:text-white'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
 

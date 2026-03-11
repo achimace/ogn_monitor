@@ -126,6 +126,7 @@ from app.api.airfields import router as airfields_router
 from app.api.aircraft import router as aircraft_router
 from app.api.monitor import router as monitor_router
 from app.api.websocket import router as ws_router
+from app.api.flight_log import router as flight_log_router
 
 app.include_router(auth_router)
 app.include_router(tenants_router)
@@ -133,3 +134,4 @@ app.include_router(airfields_router)
 app.include_router(aircraft_router)
 app.include_router(monitor_router)
 app.include_router(ws_router)
+app.include_router(flight_log_router)

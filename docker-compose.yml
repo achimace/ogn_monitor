@@ -8,6 +8,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./backups:/backups
     ports:
       - "${DB_PORT:-5432}:5432"
     healthcheck:
@@ -20,7 +21,7 @@ services:
     image: redis:7-alpine
     volumes:
       - redisdata:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru --save 300 1
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -41,6 +42,7 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 10s
     deploy:
       replicas: 1  # SINGLETON - niemals mehr als 1!
 
@@ -63,6 +65,7 @@ services:
       worker:
         condition: service_started
     restart: unless-stopped
+    stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -81,6 +84,10 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/health || exit 1"]
+      interval: 10s
+      retries: 3
 
 volumes:
   pgdata:

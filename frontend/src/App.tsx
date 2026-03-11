@@ -4,6 +4,7 @@ import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import AirfieldConfigPage from './pages/AirfieldConfigPage'
 import AircraftManagePage from './pages/AircraftManagePage'
+import FlightLogPage from './pages/FlightLogPage'
 import MonitorPage from './pages/MonitorPage'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
@@ -24,6 +25,7 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/dashboard/airfield" element={<AirfieldConfigPage />} />
               <Route path="/dashboard/aircraft" element={<AircraftManagePage />} />
+              <Route path="/dashboard/log" element={<FlightLogPage />} />
             </Route>
           </Route>
 
