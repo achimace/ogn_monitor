@@ -165,72 +165,21 @@ Zertifikate liegen dann unter:
 - `/etc/letsencrypt/live/flight-monitor.de/fullchain.pem`
 - `/etc/letsencrypt/live/flight-monitor.de/privkey.pem`
 
-### 6.3 Zertifikate fuer Nginx bereitstellen
+### 6.3 Produktions-Nginx-Config aktivieren
 
-```bash
-mkdir -p /opt/ogn_monitor/nginx/ssl
-ln -sf /etc/letsencrypt/live/flight-monitor.de/fullchain.pem /opt/ogn_monitor/nginx/ssl/fullchain.pem
-ln -sf /etc/letsencrypt/live/flight-monitor.de/privkey.pem /opt/ogn_monitor/nginx/ssl/privkey.pem
-```
-
-### 6.4 Nginx-Config fuer SSL aktivieren
-
-Die SSL-Zeilen in `nginx/nginx.conf` sind bereits vorbereitet (auskommentiert).
-Aktiviere sie:
+Die Prod-Config mit SSL liegt bereits fertig im Repo als `nginx/nginx.prod.conf`.
+Ersetze die Dev-Config damit:
 
 ```bash
 cd /opt/ogn_monitor
+cp nginx/nginx.prod.conf nginx/nginx.conf
 ```
 
-Ersetze den `server`-Block in `nginx/nginx.conf`:
+> **WICHTIG**: Das Nginx-Dockerfile baut die Config beim Build ein.
+> Nach dem Kopieren muss `docker compose up -d --build` ausgefuehrt werden.
 
-```nginx
-    # HTTP -> HTTPS Redirect
-    server {
-        listen 80;
-        server_name flight-monitor.de www.flight-monitor.de;
-
-        # Let's Encrypt ACME Challenge
-        location /.well-known/acme-challenge/ {
-            root /usr/share/nginx/html;
-        }
-
-        location / {
-            return 301 https://$host$request_uri;
-        }
-    }
-
-    # HTTPS Server
-    server {
-        listen 443 ssl http2;
-        server_name flight-monitor.de www.flight-monitor.de;
-
-        ssl_certificate /etc/nginx/ssl/fullchain.pem;
-        ssl_certificate_key /etc/nginx/ssl/privkey.pem;
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_ciphers HIGH:!aNULL:!MD5;
-        ssl_prefer_server_ciphers on;
-
-        # HSTS (erst aktivieren wenn SSL sicher funktioniert)
-        # add_header Strict-Transport-Security "max-age=63072000" always;
-
-        # ... (Rest der Config bleibt gleich: Security headers,
-        #      location /api/, /api/auth/, /ws/, etc.)
-    }
-```
-
-### 6.5 SSL-Volume in docker-compose.yml pruefen
-
-Die `docker-compose.yml` mountet bereits das SSL-Verzeichnis:
-
-```yaml
-nginx:
-  volumes:
-    - ./nginx/ssl:/etc/nginx/ssl:ro
-```
-
-Das passt. Durch die Symlinks werden die Let's Encrypt Zertifikate
-in den Container gemountet.
+Die `docker-compose.yml` mountet `/etc/letsencrypt` direkt in den Container.
+Die Zertifikate sind ohne Symlinks sofort verfuegbar.
 
 ## 7. Anwendung starten
 

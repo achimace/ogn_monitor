@@ -80,6 +80,7 @@ services:
       - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./nginx/ssl:/etc/nginx/ssl:ro
+      - letsencrypt:/etc/letsencrypt:ro
     depends_on:
       api:
         condition: service_healthy
@@ -92,3 +93,9 @@ services:
 volumes:
   pgdata:
   redisdata:
+  letsencrypt:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /etc/letsencrypt
