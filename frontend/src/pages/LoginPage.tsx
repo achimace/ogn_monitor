@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { useAuthStore } from '../store/authStore'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -11,7 +12,8 @@ export default function LoginPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     await login(email, password)
-    if (useAuth().isAuthenticated) {
+    // Check store directly (not via hook) after async login
+    if (useAuthStore.getState().token) {
       navigate('/dashboard')
     }
   }

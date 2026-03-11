@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
+import { useAuthStore } from '../store/authStore'
 
 const DISCLAIMER_TEXT = `WICHTIGER HINWEIS:
 
@@ -60,9 +61,8 @@ export default function RegisterPage() {
     }
 
     await register(email, password, tenantName, disclaimerAccepted)
-    // Check if registration+login succeeded
-    const { isAuthenticated } = useAuth()
-    if (isAuthenticated) {
+    // Check store directly (not via hook) after async register
+    if (useAuthStore.getState().token) {
       navigate('/dashboard')
     }
   }
