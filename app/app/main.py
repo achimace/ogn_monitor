@@ -95,12 +95,18 @@ async def ogn_health():
     return health_data
 
 
-# --- API Routers (added incrementally) ---
+# --- API Routers (Phase 1) ---
 
-# TODO Phase 1: from app.api.auth import router as auth_router
-# TODO Phase 1: from app.api.tenants import router as tenants_router
-# TODO Phase 1: from app.api.airfields import router as airfields_router
-# TODO Phase 1: from app.api.aircraft import router as aircraft_router
+from app.api.auth import router as auth_router
+from app.api.tenants import router as tenants_router
+from app.api.airfields import router as airfields_router
+from app.api.aircraft import router as aircraft_router
+
+app.include_router(auth_router)
+app.include_router(tenants_router)
+app.include_router(airfields_router)
+app.include_router(aircraft_router)
+
 # TODO Phase 3: from app.api.monitor import router as monitor_router
 # TODO Phase 3: from app.api.websocket import router as ws_router
 # TODO Phase 5: from app.api.flights import router as flights_router

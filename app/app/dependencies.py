@@ -1,13 +1,12 @@
-"""FastAPI Dependencies - Auth, Tenant Context, DB access."""
+"""FastAPI Dependencies - Auth, Tenant Context."""
+
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 
-# Will be expanded with:
-# - get_current_user() - JWT validation
-# - get_current_tenant() - tenant context from JWT
-# - get_db_pool() - database connection
-# - get_redis() - redis connection
+from app.config import settings
 
 security = HTTPBearer(auto_error=False)
 
@@ -17,15 +16,38 @@ async def get_current_user(
 ) -> dict:
     """Validate JWT token and return user data.
 
-    TODO Phase 1: Implement JWT validation.
+    Returns dict with: tenant_id (UUID), email (str), email_verified (bool)
     """
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
+            detail="Nicht authentifiziert",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    # TODO: Decode and validate JWT
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Auth not yet implemented",
-    )
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            settings.jwt_secret,
+            algorithms=[settings.jwt_algorithm],
+        )
+        tenant_id_str: str | None = payload.get("sub")
+        email: str | None = payload.get("email")
+
+        if tenant_id_str is None or email is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Ungueltiger Token",
+            )
+
+        return {
+            "tenant_id": UUID(tenant_id_str),
+            "email": email,
+            "email_verified": payload.get("email_verified", False),
+        }
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token ungueltig oder abgelaufen",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
