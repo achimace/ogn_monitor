@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(cd C:/_projekte/ogn_monitor*)",
+      "Bash(pip install*)",
+      "Bash(npm *)",
+      "Bash(pytest*)",
+      "Bash(uvicorn*)",
+      "Bash(python -m app.*)",
+      "Bash(alembic*)",
+      "Bash(curl*)",
+      "Bash(git *)",
+      "Bash(mkdir*)",
+      "Bash(touch*)",
+      "Bash(ls*)"
+    ]
+  }
+}
