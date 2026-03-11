@@ -138,3 +138,20 @@ async def accept_disclaimer(
 
     log.info("disclaimer_accepted", tenant_id=str(user["tenant_id"]), version=body.version)
     return {"message": "Haftungsausschluss akzeptiert", "version": row["disclaimer_version"]}
+
+
+@router.get("/me")
+async def get_me(user: dict = Depends(get_current_user)):
+    """Get current user profile."""
+    pool = get_db()
+    row = await pool.fetchrow(q.TENANT_BY_ID, user["tenant_id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Mandant nicht gefunden")
+
+    return {
+        "id": str(row["id"]),
+        "email": row["email"],
+        "tenantId": str(row["id"]),
+        "tenantName": row["name"],
+        "role": "admin",
+    }

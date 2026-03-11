@@ -30,7 +30,7 @@ export default function AirfieldConfigPage() {
 
   async function loadAirfields() {
     try {
-      const data = await api.get<Airfield[]>('/airfields/')
+      const data = await api.get<Airfield[]>('/airfields')
       setAirfields(data)
       if (data.length > 0 && !editing) {
         setEditing(data[0] ?? null)
@@ -54,7 +54,7 @@ export default function AirfieldConfigPage() {
         await api.put(`/airfields/${editing.id}`, editing)
         setSuccess('Flugplatz gespeichert')
       } else {
-        await api.post('/airfields/', editing)
+        await api.post('/airfields', editing)
         setSuccess('Flugplatz erstellt')
       }
       await loadAirfields()

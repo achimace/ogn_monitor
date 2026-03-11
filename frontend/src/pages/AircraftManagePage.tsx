@@ -1,11 +1,18 @@
 /**
  * Aircraft management page - add/edit tenant aircraft.
+ * Aircraft API is nested: /api/airfields/{airfield_id}/aircraft
  */
 import { useState, useEffect, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
 
+interface Airfield {
+  id: string
+  name: string
+  slug: string
+}
+
 interface Aircraft {
-  id: number
+  id: string
   registration: string
   competition_sign: string
   flarm_id: string
@@ -15,6 +22,7 @@ interface Aircraft {
 }
 
 export default function AircraftManagePage() {
+  const [airfieldId, setAirfieldId] = useState<string | null>(null)
   const [aircraft, setAircraft] = useState<Aircraft[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -25,11 +33,30 @@ export default function AircraftManagePage() {
   })
   const [saving, setSaving] = useState(false)
 
-  useEffect(() => { loadAircraft() }, [])
+  useEffect(() => { loadAirfield() }, [])
 
-  async function loadAircraft() {
+  async function loadAirfield() {
     try {
-      const data = await api.get<Aircraft[]>('/aircraft/')
+      const airfields = await api.get<Airfield[]>('/airfields')
+      if (airfields.length > 0) {
+        const afId = airfields[0]!.id
+        setAirfieldId(afId)
+        await loadAircraft(afId)
+      } else {
+        setError('Bitte zuerst einen Flugplatz anlegen')
+        setLoading(false)
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Laden fehlgeschlagen')
+      setLoading(false)
+    }
+  }
+
+  async function loadAircraft(afId?: string) {
+    const id = afId || airfieldId
+    if (!id) return
+    try {
+      const data = await api.get<Aircraft[]>(`/airfields/${id}/aircraft`)
       setAircraft(data)
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Laden fehlgeschlagen')
@@ -40,10 +67,11 @@ export default function AircraftManagePage() {
 
   async function handleAdd(e: FormEvent) {
     e.preventDefault()
+    if (!airfieldId) return
     setSaving(true)
     setError('')
     try {
-      await api.post('/aircraft/', form)
+      await api.post(`/airfields/${airfieldId}/aircraft`, form)
       setShowForm(false)
       setForm({ registration: '', competition_sign: '', flarm_id: '', aircraft_model: '', aircraft_type: 'glider', is_active: true })
       await loadAircraft()
@@ -54,9 +82,10 @@ export default function AircraftManagePage() {
     }
   }
 
-  async function handleDelete(id: number) {
+  async function handleDelete(id: string) {
+    if (!airfieldId) return
     try {
-      await api.delete(`/aircraft/${id}`)
+      await api.delete(`/airfields/${airfieldId}/aircraft/${id}`)
       await loadAircraft()
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Loeschen fehlgeschlagen')
@@ -71,7 +100,8 @@ export default function AircraftManagePage() {
         <h2 className="text-xl font-bold text-white">Flugzeuge</h2>
         <button
           onClick={() => setShowForm(!showForm)}
-          className="bg-tower-qdr hover:bg-cyan-500 text-white text-sm font-semibold rounded-lg px-4 py-2 transition-colors"
+          disabled={!airfieldId}
+          className="bg-tower-qdr hover:bg-cyan-500 text-white text-sm font-semibold rounded-lg px-4 py-2 transition-colors disabled:opacity-50"
         >
           + Flugzeug hinzufuegen
         </button>

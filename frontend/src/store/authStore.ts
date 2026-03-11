@@ -45,17 +45,21 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  register: async (email, password, tenantName, disclaimerAccepted) => {
+  register: async (email, password, tenantName, _disclaimerAccepted) => {
     set({ loading: true, error: null })
     try {
-      await api.post('/auth/register', {
+      // Generate slug from tenant name
+      const slug = tenantName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      const data = await api.post<{ access_token: string }>('/auth/register', {
         email,
         password,
-        tenant_name: tenantName,
-        disclaimer_accepted: disclaimerAccepted,
+        name: tenantName,
+        slug,
       })
-      // Auto-login after registration
-      await useAuthStore.getState().login(email, password)
+      // Registration returns a token directly
+      localStorage.setItem('token', data.access_token)
+      set({ token: data.access_token, loading: false })
+      useAuthStore.getState().loadUser()
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : 'Registrierung fehlgeschlagen'
       set({ loading: false, error: msg })

@@ -20,6 +20,14 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/api/flight-log", tags=["FlightLog"])
 
 
+async def _get_airfield_ids(db, tenant_id) -> list:
+    """Get all airfield IDs belonging to the tenant."""
+    rows = await db.fetch(
+        "SELECT id FROM airfields WHERE tenant_id = $1", tenant_id
+    )
+    return [r["id"] for r in rows]
+
+
 @router.get("/")
 async def get_flight_log(
     page: int = Query(1, ge=1),
@@ -29,12 +37,15 @@ async def get_flight_log(
 ):
     """Get paginated flight log for the current tenant."""
     db = get_db()
-    tenant_id = user["tenant_id"]
+    airfield_ids = await _get_airfield_ids(db, user["tenant_id"])
+    if not airfield_ids:
+        return {"items": [], "total": 0, "page": 1, "pages": 1}
 
-    # Build query
-    conditions = ["fl.tenant_id = $1"]
-    params: list = [tenant_id]
-    idx = 2
+    # Build query with airfield_id IN (...)
+    placeholders = ", ".join(f"${i+1}" for i in range(len(airfield_ids)))
+    conditions = [f"fl.airfield_id IN ({placeholders})"]
+    params: list = list(airfield_ids)
+    idx = len(airfield_ids) + 1
 
     if date_filter:
         conditions.append(f"fl.takeoff_time::date = ${idx}")
@@ -54,7 +65,9 @@ async def get_flight_log(
         f"""SELECT fl.id, fl.flarm_id, fl.registration, fl.competition_sign,
                    fl.aircraft_model, fl.takeoff_time, fl.landing_time,
                    fl.flight_duration_s, fl.max_altitude_m, fl.max_distance_m,
-                   fl.launch_type, fl.end_status, fl.tow_plane_reg, fl.release_alt_m
+                   fl.launch_type, fl.landing_type,
+                   fl.tow_plane_registration, fl.release_altitude_m,
+                   fl.signal_loss_scenario
             FROM flight_log fl
             WHERE {where}
             ORDER BY fl.takeoff_time DESC
@@ -64,8 +77,17 @@ async def get_flight_log(
 
     pages = max(1, (total + per_page - 1) // per_page)
 
+    items = []
+    for r in rows:
+        item = dict(r)
+        # Normalize for frontend
+        item['end_status'] = r['landing_type'] or r['signal_loss_scenario'] or 'unknown'
+        item['tow_plane_reg'] = r['tow_plane_registration']
+        item['release_alt_m'] = r['release_altitude_m']
+        items.append(item)
+
     return {
-        "items": [dict(r) for r in rows],
+        "items": items,
         "total": total,
         "page": page,
         "pages": pages,
@@ -77,16 +99,22 @@ async def export_csv(
     date_filter: str | None = Query(None, alias="date"),
     user: dict = Depends(get_current_user),
 ):
-    """Export flight log as CSV (Startschreiber format).
-
-    Includes F-Schlepp billing data (tow plane, release altitude).
-    """
+    """Export flight log as CSV (Startschreiber format)."""
     db = get_db()
-    tenant_id = user["tenant_id"]
+    airfield_ids = await _get_airfield_ids(db, user["tenant_id"])
+    if not airfield_ids:
+        output = io.StringIO()
+        csv.writer(output, delimiter=';').writerow(['Keine Daten'])
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="fluglog-leer.csv"'},
+        )
 
-    conditions = ["fl.tenant_id = $1"]
-    params: list = [tenant_id]
-    idx = 2
+    placeholders = ", ".join(f"${i+1}" for i in range(len(airfield_ids)))
+    conditions = [f"fl.airfield_id IN ({placeholders})"]
+    params: list = list(airfield_ids)
+    idx = len(airfield_ids) + 1
 
     if date_filter:
         conditions.append(f"fl.takeoff_time::date = ${idx}")
@@ -99,7 +127,7 @@ async def export_csv(
         f"""SELECT fl.registration, fl.competition_sign, fl.aircraft_model,
                    fl.takeoff_time, fl.landing_time, fl.flight_duration_s,
                    fl.max_altitude_m, fl.max_distance_m, fl.launch_type,
-                   fl.end_status, fl.tow_plane_reg, fl.release_alt_m
+                   fl.landing_type, fl.tow_plane_registration, fl.release_altitude_m
             FROM flight_log fl
             WHERE {where}
             ORDER BY fl.takeoff_time ASC""",
@@ -109,7 +137,6 @@ async def export_csv(
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
 
-    # Header
     writer.writerow([
         'Kennzeichen', 'WB-Kz', 'Typ', 'Start (UTC)', 'Landung (UTC)',
         'Dauer (h:mm)', 'Max Hoehe (m)', 'Max Distanz (km)', 'Startart',
@@ -137,9 +164,9 @@ async def export_csv(
             r['max_altitude_m'] or '',
             round(r['max_distance_m'] / 1000, 1) if r['max_distance_m'] else '',
             launch_map.get(r['launch_type'] or '', r['launch_type'] or ''),
-            r['end_status'] or '',
-            r['tow_plane_reg'] or '',
-            r['release_alt_m'] or '',
+            r['landing_type'] or '',
+            r['tow_plane_registration'] or '',
+            r['release_altitude_m'] or '',
         ])
 
     filename = f"fluglog-{date_filter or date.today().isoformat()}.csv"
@@ -158,10 +185,15 @@ async def get_stats(
 ):
     """Get daily flight statistics for the last N days."""
     db = get_db()
-    tenant_id = user["tenant_id"]
+    airfield_ids = await _get_airfield_ids(db, user["tenant_id"])
+    if not airfield_ids:
+        return {"days": days, "stats": []}
+
+    placeholders = ", ".join(f"${i+1}" for i in range(len(airfield_ids)))
+    idx = len(airfield_ids) + 1
 
     rows = await db.fetch(
-        """SELECT
+        f"""SELECT
              takeoff_time::date AS day,
              COUNT(*) AS flights,
              COUNT(*) FILTER (WHERE launch_type = 'winch') AS winch_starts,
@@ -171,11 +203,11 @@ async def get_stats(
              COALESCE(MAX(max_altitude_m), 0) AS max_altitude_m,
              COALESCE(MAX(max_distance_m), 0) AS max_distance_m
            FROM flight_log
-           WHERE tenant_id = $1
-             AND takeoff_time >= NOW() - ($2 || ' days')::interval
+           WHERE airfield_id IN ({placeholders})
+             AND takeoff_time >= NOW() - (${idx} || ' days')::interval
            GROUP BY takeoff_time::date
            ORDER BY day DESC""",
-        tenant_id, str(days),
+        *airfield_ids, str(days),
     )
 
     return {
