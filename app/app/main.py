@@ -3,11 +3,12 @@
 This is the API server that handles:
 - REST API (Auth, CRUD, Monitor data)
 - WebSocket connections (real-time flight updates)
-- Redis -> PostgreSQL state synchronization
+- Redis PubSub listener for broadcasting APRS Worker updates
 
 Started via: uvicorn app.main:app --workers 4
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,6 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db.connection import init_db, close_db
 from app.redis_client import init_redis, close_redis
+
+# Set root logging level
+logging.basicConfig(
+    format="%(message)s",
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+)
 
 # Configure structured logging
 structlog.configure(
@@ -35,12 +42,17 @@ structlog.configure(
 
 log = structlog.get_logger()
 
+# PubSub listener task (per worker process)
+_pubsub_task: asyncio.Task | None = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan - startup and shutdown."""
+    global _pubsub_task
+
     # Startup
-    log.info("Starting OGN FlightMonitor API Server", version="0.1.0")
+    log.info("Starting OGN FlightMonitor API Server", version="0.2.0")
 
     await init_db()
     log.info("PostgreSQL connection pool initialized")
@@ -48,13 +60,24 @@ async def lifespan(app: FastAPI):
     await init_redis()
     log.info("Redis connection initialized")
 
-    # TODO: Start Redis PubSub subscriber for WebSocket broadcast
-    # TODO: Start periodic Redis -> PostgreSQL state sync
+    # Start Redis PubSub listener for WebSocket broadcast
+    from app.api.pubsub_listener import start_pubsub_listener
+    _pubsub_task = asyncio.create_task(
+        start_pubsub_listener(),
+        name="pubsub_listener",
+    )
+    log.info("Redis PubSub listener started")
 
     yield
 
     # Shutdown
     log.info("Shutting down OGN FlightMonitor API Server")
+    if _pubsub_task:
+        _pubsub_task.cancel()
+        try:
+            await _pubsub_task
+        except asyncio.CancelledError:
+            pass
     await close_redis()
     await close_db()
 
@@ -62,7 +85,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OGN FlightMonitor",
     description="Echtzeit-Flugmonitoring fuer Segelflugplaetze",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -95,19 +118,18 @@ async def ogn_health():
     return health_data
 
 
-# --- API Routers (Phase 1) ---
+# --- API Routers ---
 
 from app.api.auth import router as auth_router
 from app.api.tenants import router as tenants_router
 from app.api.airfields import router as airfields_router
 from app.api.aircraft import router as aircraft_router
+from app.api.monitor import router as monitor_router
+from app.api.websocket import router as ws_router
 
 app.include_router(auth_router)
 app.include_router(tenants_router)
 app.include_router(airfields_router)
 app.include_router(aircraft_router)
-
-# TODO Phase 3: from app.api.monitor import router as monitor_router
-# TODO Phase 3: from app.api.websocket import router as ws_router
-# TODO Phase 5: from app.api.flights import router as flights_router
-# TODO Phase 6: from app.api.admin import router as admin_router
+app.include_router(monitor_router)
+app.include_router(ws_router)
