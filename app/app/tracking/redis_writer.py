@@ -58,7 +58,7 @@ class RedisWriter:
         message = json.dumps({
             "type": "beacon",
             "flarm_id": flarm_id,
-            "data": {k: str(v) for k, v in data.items()},
+            "data": data,
         })
         await self._redis.publish(f"beacon:{airfield_slug}", message)
 
