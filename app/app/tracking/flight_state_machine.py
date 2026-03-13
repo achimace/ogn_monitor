@@ -34,6 +34,7 @@ class AirfieldConfig:
     home_radius_m: int = 800
     takeoff_speed_kmh: int = 40
     takeoff_alt_offset_m: int = 50
+    takeoff_max_agl_m: int = 1000
     landing_speed_kmh: int = 50
     alarm_timeout_s: int = 600
     signal_loss_timeout_s: int = 300
@@ -105,8 +106,9 @@ class FlightStateMachine:
             # Not tracking this aircraft yet - check for takeoff
             if at_home:
                 is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
+                is_too_high = agl > config.takeoff_max_agl_m
                 is_fast = beacon.speed >= config.takeoff_speed_kmh
-                if is_high and is_fast:
+                if is_high and is_fast and not is_too_high:
                     # New takeoff detected!
                     flight = FlightState(
                         flarm_id=beacon.flarm_id,
@@ -127,6 +129,15 @@ class FlightStateMachine:
                         altitude=beacon.altitude,
                         speed=beacon.speed,
                     )
+                elif is_too_high:
+                    log.debug(
+                        "overflight_ignored",
+                        flarm_id=beacon.flarm_id,
+                        airfield=slug,
+                        agl=round(agl),
+                        max_agl=config.takeoff_max_agl_m,
+                    )
+                    return None  # Overflight at high altitude, not a takeoff
                 else:
                     return None  # On ground, not taking off
             else:
