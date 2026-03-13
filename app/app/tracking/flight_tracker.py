@@ -122,15 +122,18 @@ class FlightTracker:
 
         # Publish beacon update
         await self.redis_writer.publish_beacon(slug, beacon.flarm_id, {
-            "lat": beacon.lat,
-            "lon": beacon.lon,
-            "alt": beacon.altitude,
-            "speed": beacon.speed,
-            "vs": beacon.vs,
+            "latitude": round(beacon.lat, 5),
+            "longitude": round(beacon.lon, 5),
+            "altitude_m": round(beacon.altitude),
+            "altitude_agl": round(flight.altitude_agl),
+            "speed_kmh": round(beacon.speed),
+            "vertical_speed_ms": round(beacon.vs, 1),
+            "track_deg": round(beacon.track),
             "status": flight.status.value,
-            "qdr": flight.qdr_deg,
-            "dist": flight.distance_m,
-            "bearing": flight.bearing_text,
+            "qdr_deg": round(flight.qdr_deg),
+            "distance_m": round(flight.distance_m),
+            "bearing_text": flight.bearing_text,
+            "last_seen": flight.last_seen,
         })
 
         # Add to position stream

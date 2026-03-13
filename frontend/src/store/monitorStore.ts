@@ -82,7 +82,7 @@ function normalizeFlightData(raw: Record<string, unknown>): Flight {
     status,
     qdrDeg: Number(raw.qdrDeg || 0),
     bearingText: String(raw.bearingText || ''),
-    distanceM: Number(raw.distanceM || raw.distanceKm ? Number(raw.distanceKm) * 1000 : Number(raw.distanceM || 0)),
+    distanceM: raw.distanceM ? Number(raw.distanceM) : (raw.distanceKm ? Number(raw.distanceKm) * 1000 : 0),
     altitudeM: Number(raw.altitudeM || 0),
     altitudeAgl: Number(raw.altitudeAgl || 0),
     speedKmh: Number(raw.speedKmh || 0),
