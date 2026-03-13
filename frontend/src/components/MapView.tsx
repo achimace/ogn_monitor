@@ -246,7 +246,7 @@ function addRadiusCircle(map: maplibregl.Map, lat: number, lng: number, radiusM:
 
 function updateQdrLines(map: maplibregl.Map, flights: Flight[], homeLat: number, homeLng: number) {
   const features = flights
-    .filter((f) => f.latitude && f.longitude && ['flying', 'towing', 'alarm', 'emergency', 'signal_lost'].includes(f.status))
+    .filter((f) => f.latitude && f.longitude && ['flying', 'towing', 'alarm', 'emergency', 'signal_lost', 'outlanding', 'outlanding_pending', 'diverted'].includes(f.status))
     .map((f) => ({
       type: 'Feature' as const,
       properties: { color: STATUS_COLORS[f.status] || '#6b7280' },

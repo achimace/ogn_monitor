@@ -43,6 +43,8 @@ class AirfieldConfig:
     ogn_filter_radius_km: int = 500
     tow_plane_flarm_ids: list[str] | None = None
     winch_vs_threshold_ms: float = 8.0
+    ground_speed_max_kmh: int = 30
+    ground_max_agl_m: int = 50
 
 
 def _utcnow_iso() -> str:
@@ -53,9 +55,16 @@ def _utcnow_iso() -> str:
 class FlightStateMachine:
     """Processes beacons and manages flight state transitions."""
 
+    # Max age for ground cache entries (seconds, monotonic)
+    GROUND_CACHE_MAX_AGE_S = 7200  # 2 hours
+
     def __init__(self):
         # Active flights: airfield_slug -> { flarm_id -> FlightState }
         self.flights: dict[str, dict[str, FlightState]] = {}
+
+        # Ground cache: tracks aircraft seen stationary at home airfield
+        # airfield_slug -> { flarm_id -> monotonic timestamp first seen on ground }
+        self._ground_cache: dict[str, dict[str, float]] = {}
 
         # Events generated during processing (consumed by flight tracker)
         self._pending_events: list[dict] = []
@@ -104,44 +113,69 @@ class FlightStateMachine:
 
         if flight is None:
             # Not tracking this aircraft yet - check for takeoff
-            if at_home:
-                is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
-                is_too_high = agl > config.takeoff_max_agl_m
-                is_fast = beacon.speed >= config.takeoff_speed_kmh
-                if is_high and is_fast and not is_too_high:
-                    # New takeoff detected!
-                    flight = FlightState(
-                        flarm_id=beacon.flarm_id,
-                        airfield_slug=slug,
-                        airfield_id=config.id,
-                        status=FlightStatus.TAKEOFF,
-                        takeoff_time=now_iso,
-                    )
-                    if slug not in self.flights:
-                        self.flights[slug] = {}
-                    self.flights[slug][beacon.flarm_id] = flight
-
-                    self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
-                    log.info(
-                        "takeoff_detected",
-                        flarm_id=beacon.flarm_id,
-                        airfield=slug,
-                        altitude=beacon.altitude,
-                        speed=beacon.speed,
-                    )
-                elif is_too_high:
-                    log.debug(
-                        "overflight_ignored",
-                        flarm_id=beacon.flarm_id,
-                        airfield=slug,
-                        agl=round(agl),
-                        max_agl=config.takeoff_max_agl_m,
-                    )
-                    return None  # Overflight at high altitude, not a takeoff
-                else:
-                    return None  # On ground, not taking off
-            else:
+            if not at_home:
                 return None  # Not at home airfield, discard
+
+            # Ensure ground cache dict exists for this airfield
+            if slug not in self._ground_cache:
+                self._ground_cache[slug] = {}
+            gc = self._ground_cache[slug]
+
+            # Track aircraft seen stationary on the ground
+            is_on_ground = (beacon.speed < config.ground_speed_max_kmh
+                            and agl < config.ground_max_agl_m)
+            if is_on_ground:
+                if beacon.flarm_id not in gc:
+                    gc[beacon.flarm_id] = now_mono
+                    log.debug(
+                        "ground_contact",
+                        flarm_id=beacon.flarm_id,
+                        airfield=slug,
+                        speed=beacon.speed,
+                        agl=round(agl),
+                    )
+                return None  # On ground, not airborne yet
+
+            # Aircraft is moving/airborne - check for takeoff
+            is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
+            is_too_high = agl > config.takeoff_max_agl_m
+            is_fast = beacon.speed >= config.takeoff_speed_kmh
+            was_on_ground = beacon.flarm_id in gc
+
+            if is_high and is_fast and not is_too_high and was_on_ground:
+                # Aircraft was on ground and is now airborne - takeoff!
+                gc.pop(beacon.flarm_id, None)
+                flight = FlightState(
+                    flarm_id=beacon.flarm_id,
+                    airfield_slug=slug,
+                    airfield_id=config.id,
+                    status=FlightStatus.TAKEOFF,
+                    takeoff_time=now_iso,
+                )
+                if slug not in self.flights:
+                    self.flights[slug] = {}
+                self.flights[slug][beacon.flarm_id] = flight
+
+                self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
+                log.info(
+                    "takeoff_detected",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    altitude=beacon.altitude,
+                    speed=beacon.speed,
+                )
+            elif not was_on_ground:
+                log.debug(
+                    "overflight_ignored",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    agl=round(agl),
+                    speed=beacon.speed,
+                    reason="not_seen_on_ground",
+                )
+                return None  # Never seen on ground - overflight
+            else:
+                return None  # At home but not yet taking off
 
         # Update flight position data
         flight.latitude = beacon.lat
@@ -291,6 +325,13 @@ class FlightStateMachine:
                             airfield=slug,
                         )
                         changed.append(flight)
+
+        # Clean up stale ground cache entries (> 2h old)
+        for slug, gc in list(self._ground_cache.items()):
+            stale = [fid for fid, ts in gc.items()
+                     if (now_mono - ts) > self.GROUND_CACHE_MAX_AGE_S]
+            for fid in stale:
+                del gc[fid]
 
         return changed
 
