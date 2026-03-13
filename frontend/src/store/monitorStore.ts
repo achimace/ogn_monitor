@@ -203,7 +203,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     for (const f of get().flights.values()) {
       if (statuses.includes(f.status)) result.push(f)
     }
-    return result.sort((a, b) => a.registration?.localeCompare(b.registration || '') || 0)
+    return result.sort((a, b) => (b.takeoffTime || '').localeCompare(a.takeoffTime || ''))
   },
 
   getAlarmFlights: () => {

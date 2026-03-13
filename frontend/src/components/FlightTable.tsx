@@ -15,13 +15,16 @@ interface FlightTableProps {
 }
 
 export default function FlightTable({ flights }: FlightTableProps) {
-  // Group by status category
-  const emergency = flights.filter((f) => f.status === 'emergency')
-  const alarm = flights.filter((f) => ['alarm', 'signal_lost'].includes(f.status))
-  const towing = flights.filter((f) => f.status === 'towing')
-  const flying = flights.filter((f) => f.status === 'flying')
-  const outlanding = flights.filter((f) => ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status))
-  const landed = flights.filter((f) => ['landing', 'ground'].includes(f.status))
+  // Sort by takeoff time descending (latest first), then group by status
+  const sorted = [...flights].sort((a, b) =>
+    (b.takeoffTime || '').localeCompare(a.takeoffTime || '')
+  )
+  const emergency = sorted.filter((f) => f.status === 'emergency')
+  const alarm = sorted.filter((f) => ['alarm', 'signal_lost'].includes(f.status))
+  const towing = sorted.filter((f) => f.status === 'towing')
+  const flying = sorted.filter((f) => f.status === 'flying')
+  const outlanding = sorted.filter((f) => ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status))
+  const landed = sorted.filter((f) => ['landing', 'ground'].includes(f.status))
 
   return (
     <div className="space-y-3">
