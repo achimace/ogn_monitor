@@ -80,7 +80,8 @@ export default function HomePolygonEditor({
   const mapRef = useRef<maplibregl.Map | null>(null)
   const [mode, setMode] = useState<Mode>('view')
   const [vertices, setVertices] = useState<[number, number][]>(verticesFromPolygon(polygon))
-  // Stable refs so handlers always see the latest state
+  const [mapReady, setMapReady] = useState(false)
+  // Stable refs so async map handlers always see the latest state
   const modeRef = useRef(mode)
   const vertsRef = useRef(vertices)
   modeRef.current = mode
@@ -158,7 +159,7 @@ export default function HomePolygonEditor({
         },
       })
 
-      redraw()
+      setMapReady(true)
     })
 
     // Click: add vertex (draw mode) or remove vertex (edit + shift)
@@ -228,17 +229,35 @@ export default function HomePolygonEditor({
     }
   }, [latitude, longitude, radiusM])
 
-  // Redraw whenever vertices change
-  useEffect(() => { redraw() }, [vertices])
+  // Redraw whenever vertices change OR the map becomes ready for the first time
+  useEffect(() => { redraw() }, [vertices, mapReady])
+
+  // Once the map is ready, fit the view to an existing polygon if any
+  useEffect(() => {
+    if (!mapReady) return
+    const map = mapRef.current
+    if (!map) return
+    const verts = vertsRef.current
+    if (verts.length < 3) return
+    const lngs = verts.map(v => v[0])
+    const lats = verts.map(v => v[1])
+    const bounds: [[number, number], [number, number]] = [
+      [Math.min(...lngs), Math.min(...lats)],
+      [Math.max(...lngs), Math.max(...lats)],
+    ]
+    map.fitBounds(bounds, { padding: 60, animate: false, maxZoom: 16 })
+  }, [mapReady])
 
   function redraw() {
     const map = mapRef.current
-    if (!map || !map.isStyleLoaded()) return
+    if (!map || !mapReady) return
     const polySrc = map.getSource('polygon') as maplibregl.GeoJSONSource | undefined
     const vertSrc = map.getSource('vertices') as maplibregl.GeoJSONSource | undefined
     if (!polySrc || !vertSrc) return
 
-    const ring = ringFromVertices(vertices)
+    // Always read the latest vertices via ref to avoid stale closures.
+    const verts = vertsRef.current
+    const ring = ringFromVertices(verts)
     polySrc.setData({
       type: 'FeatureCollection',
       features: ring
@@ -247,7 +266,7 @@ export default function HomePolygonEditor({
     })
     vertSrc.setData({
       type: 'FeatureCollection',
-      features: vertices.map((c, idx) => ({
+      features: verts.map((c, idx) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: c },
         properties: { idx },
