@@ -1935,6 +1935,76 @@ Wenn der Platz seine Schleppflugzeuge konfiguriert hat (`tow_plane_flarm_ids`), 
 
 ---
 
+## 4c. Heimatbereich als Polygon (statt Kreisradius)
+
+### Motivation
+
+Der bisherige `home_radius_m` definiert den Heimatbereich als Kreis um die
+Platzkoordinate. Das fuehrt in der Praxis zu Falscherkennungen, wenn andere
+Luftverkehrsquellen innerhalb dieses Kreises liegen. Beispiel Ohlstadt:
+
+- Hubschrauber-Station der Unfallklinik Murnau, ca. 2 km vom Platz entfernt
+- Bei einem Heimatradius >= 2 km wurden Hubschrauberstarts faelschlich als
+  Segelflugstarts erfasst
+- Bei einem Heimatradius < 2 km fehlt die Abdeckung der Platzrunde
+
+Ein **frei zeichenbares Polygon** loest das Problem:
+- Pistenachse + Vorfeld lassen sich exakt umschliessen
+- Stoerquellen wie Murnau bleiben sicher ausserhalb
+- Asymmetrische Plaetze (lange Bahn, schmales Vorfeld) werden besser abgedeckt
+
+### Datenmodell
+
+```sql
+ALTER TABLE airfields
+    ADD COLUMN home_polygon geometry(Polygon, 4326);
+
+CREATE INDEX idx_airfields_home_polygon
+    ON airfields USING GIST(home_polygon);
+```
+
+`home_radius_m` bleibt erhalten und wirkt als **Fallback**: wenn kein Polygon
+gesetzt ist, gilt weiterhin der Kreis. So ist die Migration nicht-brechend.
+
+### Backend
+
+- **Loader** (`worker.py`): liest `ST_AsGeoJSON(home_polygon)` und konvertiert
+  zu einem `shapely.geometry.Polygon`
+- **AirfieldConfig**: neues optionales Feld `home_polygon: shapely.Polygon | None`
+- **State Machine**: in `process_beacon` wird `at_home` so berechnet:
+  - wenn Polygon vorhanden: `polygon.contains(Point(lon, lat))`
+  - sonst: bisherige Kreisberechnung mit `home_radius_m`
+- **Performance**: Punkt-in-Polygon ist im sub-Mikrosekundenbereich, da pro
+  Worker nur eine Handvoll Polygone aktiv ist. Kein Geo-Index noetig.
+
+### API
+
+- `GET /api/airfields/{id}` liefert das Polygon als GeoJSON-Feature mit
+- `PUT /api/airfields/{id}` akzeptiert ein optionales `home_polygon`-Feld
+  (GeoJSON Polygon, oder `null` zum Entfernen)
+- Validierung: mindestens 4 Stuetzpunkte (geschlossener Ring), max. 100,
+  korrekt geschlossener Ring (`first == last`)
+
+### Frontend
+
+- Neue Karte in `AirfieldConfigPage` (MapLibre + OpenStreetMap-Tiles)
+- Werkzeuge:
+  - "Polygon zeichnen" (Klick fuer Stuetzpunkte, Doppelklick zum Schliessen)
+  - "Bestehendes Polygon bearbeiten" (Stuetzpunkte verschieben/loeschen)
+  - "Polygon loeschen" (Fallback auf Kreis)
+- Die Karte zeigt:
+  - Platzposition (Marker auf `latitude`/`longitude`)
+  - Aktuellen Kreisradius als gestrichelte Referenz
+  - Aktives Polygon als gefuelltes Overlay
+
+### Migration bestehender Plaetze
+
+- Keine Pflichtmigration: Plaetze ohne Polygon nutzen weiterhin den Kreis
+- Pro Platz kann der Betreiber im UI ein Polygon zeichnen, sobald er das
+  Bedarf hat (z. B. weil eine Stoerquelle im Kreis liegt)
+
+---
+
 ## 5. Frontend (Modernes Dashboard)
 
 ### Technologie

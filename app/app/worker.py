@@ -64,7 +64,8 @@ async def load_airfield_configs() -> dict:
         "SELECT id, slug, latitude, longitude, elevation_m, "
         "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, "
         "signal_loss_timeout_s, takeoff_speed_kmh, takeoff_alt_offset_m, "
-        "tow_plane_flarm_ids, winch_vs_threshold_ms "
+        "tow_plane_flarm_ids, winch_vs_threshold_ms, "
+        "ST_AsGeoJSON(home_polygon) AS home_polygon_geojson "
         "FROM airfields WHERE is_active = TRUE"
     )
 
@@ -74,6 +75,16 @@ async def load_airfield_configs() -> dict:
         tow_ids = row["tow_plane_flarm_ids"]
         if isinstance(tow_ids, str):
             tow_ids = [x.strip() for x in tow_ids.split(",") if x.strip()]
+
+        # Parse optional home polygon (GeoJSON -> shapely)
+        home_polygon = None
+        if row["home_polygon_geojson"]:
+            try:
+                import json
+                from shapely.geometry import shape
+                home_polygon = shape(json.loads(row["home_polygon_geojson"]))
+            except Exception as e:
+                log.warning("home_polygon_parse_failed", slug=slug, error=str(e))
 
         configs[slug] = AirfieldConfig(
             id=row["id"],
@@ -89,6 +100,7 @@ async def load_airfield_configs() -> dict:
             ogn_filter_radius_km=row["ogn_filter_radius_km"] or settings.ogn_default_radius_km,
             tow_plane_flarm_ids=tow_ids,
             winch_vs_threshold_ms=row["winch_vs_threshold_ms"] or 8.0,
+            home_polygon=home_polygon,
         )
 
     log.info("airfield_configs_loaded", count=len(configs))

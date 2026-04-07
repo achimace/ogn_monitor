@@ -1,5 +1,6 @@
 """Airfield API - CRUD for tenant airfields."""
 
+import json
 from uuid import UUID
 
 import structlog
@@ -18,6 +19,14 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/api/airfields", tags=["airfields"])
 
 
+def _row_to_dict(row) -> dict:
+    """Convert a DB row to a dict, parsing the GeoJSON polygon string."""
+    d = dict(row)
+    poly = d.get("home_polygon")
+    d["home_polygon"] = json.loads(poly) if isinstance(poly, str) else None
+    return d
+
+
 async def _verify_airfield_ownership(airfield_id: UUID, tenant_id: UUID) -> dict:
     """Verify the airfield belongs to the tenant. Returns airfield row."""
     pool = get_db()
@@ -26,7 +35,7 @@ async def _verify_airfield_ownership(airfield_id: UUID, tenant_id: UUID) -> dict
         raise HTTPException(status_code=404, detail="Flugplatz nicht gefunden")
     if row["tenant_id"] != tenant_id:
         raise HTTPException(status_code=403, detail="Kein Zugriff auf diesen Flugplatz")
-    return dict(row)
+    return _row_to_dict(row)
 
 
 @router.get("", response_model=list[AirfieldResponse])
@@ -34,7 +43,7 @@ async def list_airfields(user: dict = Depends(get_current_user)):
     """List all airfields of the current tenant."""
     pool = get_db()
     rows = await pool.fetch(q.AIRFIELD_LIST_BY_TENANT, user["tenant_id"])
-    return [dict(r) for r in rows]
+    return [_row_to_dict(r) for r in rows]
 
 
 @router.post("", response_model=AirfieldResponse, status_code=201)
@@ -54,6 +63,7 @@ async def create_airfield(
             body.alarm_timeout_s, body.signal_loss_timeout_s,
             body.takeoff_speed_kmh, body.takeoff_alt_offset_m,
             body.tow_plane_flarm_ids, body.winch_vs_threshold_ms,
+            json.dumps(body.home_polygon) if body.home_polygon else None,
         )
     except Exception as e:
         if "unique" in str(e).lower():
@@ -61,7 +71,7 @@ async def create_airfield(
         raise
 
     log.info("airfield_created", airfield_id=str(row["id"]), name=body.name)
-    return dict(row)
+    return _row_to_dict(row)
 
 
 @router.get("/{airfield_id}", response_model=AirfieldResponse)
@@ -91,6 +101,7 @@ async def update_airfield(
             body.takeoff_speed_kmh, body.takeoff_alt_offset_m,
             body.tow_plane_flarm_ids, body.winch_vs_threshold_ms,
             body.is_active,
+            json.dumps(body.home_polygon) if body.home_polygon else None,
         )
     except Exception as e:
         if "unique" in str(e).lower():
@@ -98,7 +109,7 @@ async def update_airfield(
         raise
 
     log.info("airfield_updated", airfield_id=str(airfield_id))
-    return dict(row)
+    return _row_to_dict(row)
 
 
 @router.delete("/{airfield_id}", status_code=204)

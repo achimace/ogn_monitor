@@ -4,8 +4,12 @@ Defines the FlightState dataclass used throughout the tracking system.
 This is the in-memory representation of a tracked flight.
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import IntEnum
+
+# Rolling window size for speed smoothing (matches PyAcphFlightsLogbook approach)
+SPEED_WINDOW_SIZE = 3
 
 
 class FlightStatus(IntEnum):
@@ -98,6 +102,17 @@ class FlightState:
 
     # Speed hysteresis tracking
     _slow_since: float = 0.0  # monotonic time when speed dropped below threshold
+
+    # Rolling window of recent ground speeds for noise-resistant detection
+    # (runtime only, not persisted to Redis)
+    _recent_speeds: deque = field(
+        default_factory=lambda: deque(maxlen=SPEED_WINDOW_SIZE)
+    )
+
+    def push_speed(self, speed_kmh: float) -> float:
+        """Append a speed sample and return the rolling average."""
+        self._recent_speeds.append(speed_kmh)
+        return sum(self._recent_speeds) / len(self._recent_speeds)
 
     def to_redis_dict(self) -> dict[str, str]:
         """Convert to dict suitable for Redis HSET."""

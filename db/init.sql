@@ -59,6 +59,11 @@ CREATE INDEX idx_airfields_active ON airfields(is_active) WHERE is_active = TRUE
 SELECT AddGeometryColumn('airfields', 'geom', 4326, 'POINT', 2);
 CREATE INDEX idx_airfields_geom ON airfields USING GIST(geom);
 
+-- Optional polygon defining the "home area" where takeoffs/landings are
+-- detected. If NULL, the circular fallback (home_radius_m) is used.
+SELECT AddGeometryColumn('airfields', 'home_polygon', 4326, 'POLYGON', 2);
+CREATE INDEX idx_airfields_home_polygon ON airfields USING GIST(home_polygon);
+
 -- Trigger to auto-update geom from lat/lon
 CREATE OR REPLACE FUNCTION update_airfield_geom()
 RETURNS TRIGGER AS $$

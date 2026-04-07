@@ -23,6 +23,7 @@ email-validator==2.1.1
 
 # Geo calculations
 geopy==2.4.1
+shapely==2.0.6
 
 # HTTP client (for DDB/FlarmNet sync)
 httpx==0.28.1

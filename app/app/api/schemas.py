@@ -76,6 +76,34 @@ class TenantUpdateRequest(BaseModel):
 # AIRFIELD
 # =============================================
 
+def _validate_polygon(v: dict | None) -> dict | None:
+    """Validate a GeoJSON Polygon used as airfield home area."""
+    if v is None:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError("home_polygon muss ein GeoJSON-Objekt sein")
+    if v.get("type") != "Polygon":
+        raise ValueError("home_polygon.type muss 'Polygon' sein")
+    coords = v.get("coordinates")
+    if not isinstance(coords, list) or len(coords) < 1:
+        raise ValueError("home_polygon.coordinates fehlt")
+    ring = coords[0]
+    if not isinstance(ring, list) or len(ring) < 4:
+        raise ValueError("home_polygon braucht mindestens 4 Punkte (geschlossen)")
+    if len(ring) > 100:
+        raise ValueError("home_polygon hat zu viele Stuetzpunkte (max 100)")
+    if ring[0] != ring[-1]:
+        raise ValueError("home_polygon Ring muss geschlossen sein (erster == letzter Punkt)")
+    for pt in ring:
+        if (not isinstance(pt, list) or len(pt) < 2
+                or not all(isinstance(c, (int, float)) for c in pt[:2])):
+            raise ValueError("home_polygon Stuetzpunkt ungueltig")
+        lon, lat = pt[0], pt[1]
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            raise ValueError("home_polygon Koordinaten ausserhalb gueltigem Bereich")
+    return v
+
+
 class AirfieldCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     slug: str = Field(..., min_length=2, max_length=50, pattern=r"^[a-z0-9-]+$")
@@ -91,6 +119,12 @@ class AirfieldCreateRequest(BaseModel):
     takeoff_alt_offset_m: int = Field(50, ge=10, le=200)
     tow_plane_flarm_ids: list[str] = Field(default_factory=list)
     winch_vs_threshold_ms: float = Field(8.0, ge=3.0, le=15.0)
+    home_polygon: dict | None = None
+
+    @field_validator("home_polygon")
+    @classmethod
+    def _check_polygon(cls, v):
+        return _validate_polygon(v)
 
 
 class AirfieldUpdateRequest(BaseModel):
@@ -109,6 +143,12 @@ class AirfieldUpdateRequest(BaseModel):
     tow_plane_flarm_ids: list[str] = Field(default_factory=list)
     winch_vs_threshold_ms: float = Field(8.0, ge=3.0, le=15.0)
     is_active: bool = True
+    home_polygon: dict | None = None
+
+    @field_validator("home_polygon")
+    @classmethod
+    def _check_polygon(cls, v):
+        return _validate_polygon(v)
 
 
 class AirfieldResponse(BaseModel):
@@ -131,6 +171,7 @@ class AirfieldResponse(BaseModel):
     is_active: bool
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    home_polygon: dict | None = None
 
 
 # =============================================

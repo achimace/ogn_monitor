@@ -4,6 +4,7 @@
  */
 import { useState, useEffect, type FormEvent } from 'react'
 import { api, ApiError } from '../api/client'
+import HomePolygonEditor, { type GeoJsonPolygon } from '../components/HomePolygonEditor'
 
 interface Airfield {
   id: string
@@ -23,6 +24,7 @@ interface Airfield {
   tow_plane_flarm_ids: string[]
   winch_vs_threshold_ms: number
   is_active: boolean
+  home_polygon: GeoJsonPolygon | null
 }
 
 type AirfieldForm = Omit<Airfield, 'id' | 'tenant_id'> & { id?: string }
@@ -43,6 +45,7 @@ const EMPTY_FORM: AirfieldForm = {
   tow_plane_flarm_ids: [],
   winch_vs_threshold_ms: 8.0,
   is_active: true,
+  home_polygon: null,
 }
 
 export default function AirfieldConfigPage() {
@@ -88,6 +91,7 @@ export default function AirfieldConfigPage() {
       tow_plane_flarm_ids: af.tow_plane_flarm_ids || [],
       winch_vs_threshold_ms: af.winch_vs_threshold_ms,
       is_active: af.is_active,
+      home_polygon: af.home_polygon ?? null,
     })
     setTowPlaneInput((af.tow_plane_flarm_ids || []).join(', '))
     setError('')
@@ -122,6 +126,7 @@ export default function AirfieldConfigPage() {
       tow_plane_flarm_ids: ids,
       winch_vs_threshold_ms: form.winch_vs_threshold_ms,
       is_active: form.is_active,
+      home_polygon: form.home_polygon,
     }
   }
 
@@ -270,6 +275,22 @@ export default function AirfieldConfigPage() {
               <p className="text-xs text-gray-500 mt-1">FLARM-IDs der Schleppflugzeuge fuer automatische F-Schlepp-Erkennung</p>
             </div>
           </fieldset>
+
+          {/* Home area polygon */}
+          {form.latitude !== 0 && form.longitude !== 0 && (
+            <fieldset>
+              <legend className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3">
+                Heimatbereich (Polygon)
+              </legend>
+              <HomePolygonEditor
+                latitude={form.latitude}
+                longitude={form.longitude}
+                radiusM={form.home_radius_m}
+                polygon={form.home_polygon}
+                onChange={(p) => setField('home_polygon', p)}
+              />
+            </fieldset>
+          )}
 
           {/* Active toggle */}
           <div className="flex items-center gap-3">

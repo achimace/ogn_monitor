@@ -11,13 +11,20 @@ Configurable per airfield via AirfieldConfig.
 """
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 
 from app.aprs.beacon_parser import Beacon
-from app.tracking.flight_state import FlightState, FlightStatus, AIRBORNE_STATUSES
+from app.tracking.flight_state import (
+    AIRBORNE_STATUSES,
+    SPEED_WINDOW_SIZE,
+    FlightState,
+    FlightStatus,
+)
 from app.tracking.geo_calc import azimuth, degrees_to_compass, haversine, altitude_agl
 
 log = structlog.get_logger()
@@ -45,6 +52,12 @@ class AirfieldConfig:
     winch_vs_threshold_ms: float = 8.0
     ground_speed_max_kmh: int = 30
     ground_max_agl_m: int = 50
+    # Altitude band around airfield elevation considered "near ground" (m)
+    near_ground_band_m: int = 60
+    # Optional shapely Polygon (lon/lat, EPSG:4326). When set, this defines
+    # the "home area" precisely; the circular home_radius_m is then unused.
+    # Typed as Any so this module does not hard-import shapely.
+    home_polygon: Any = None
 
 
 def _utcnow_iso() -> str:
@@ -62,9 +75,11 @@ class FlightStateMachine:
         # Active flights: airfield_slug -> { flarm_id -> FlightState }
         self.flights: dict[str, dict[str, FlightState]] = {}
 
-        # Ground cache: tracks aircraft seen stationary at home airfield
-        # airfield_slug -> { flarm_id -> monotonic timestamp first seen on ground }
-        self._ground_cache: dict[str, dict[str, float]] = {}
+        # Ground cache: tracks aircraft seen stationary at home airfield.
+        # airfield_slug -> { flarm_id -> {"first_seen": mono_ts, "speeds": deque} }
+        # The speed deque smooths the takeoff decision over the last N beacons
+        # so a single GPS speed glitch cannot trigger a false takeoff.
+        self._ground_cache: dict[str, dict[str, dict]] = {}
 
         # Events generated during processing (consumed by flight tracker)
         self._pending_events: list[dict] = []
@@ -105,8 +120,13 @@ class FlightStateMachine:
         dist_m = haversine(beacon.lat, beacon.lon, config.latitude, config.longitude)
         qdr = azimuth(config.latitude, config.longitude, beacon.lat, beacon.lon)
         agl = altitude_agl(beacon.altitude, config.elevation_m)
-        at_home = dist_m <= config.home_radius_m
-        is_slow = beacon.speed < config.landing_speed_kmh
+        # "At home" check: prefer polygon (precise) when configured, else
+        # fall back to circular radius around the airfield centre.
+        if config.home_polygon is not None:
+            from shapely.geometry import Point
+            at_home = config.home_polygon.contains(Point(beacon.lon, beacon.lat))
+        else:
+            at_home = dist_m <= config.home_radius_m
 
         now_mono = time.monotonic()
         now_iso = _utcnow_iso()
@@ -121,12 +141,18 @@ class FlightStateMachine:
                 self._ground_cache[slug] = {}
             gc = self._ground_cache[slug]
 
-            # Track aircraft seen stationary on the ground
+            # Track aircraft seen stationary on the ground.
+            # Use this single beacon's speed/AGL to decide ground contact;
+            # the rolling buffer is only used for the takeoff trigger so a
+            # single GPS speed glitch cannot fire takeoff prematurely.
             is_on_ground = (beacon.speed < config.ground_speed_max_kmh
                             and agl < config.ground_max_agl_m)
             if is_on_ground:
-                if beacon.flarm_id not in gc:
-                    gc[beacon.flarm_id] = now_mono
+                entry = gc.get(beacon.flarm_id)
+                if entry is None:
+                    entry = {"first_seen": now_mono,
+                             "speeds": deque(maxlen=SPEED_WINDOW_SIZE)}
+                    gc[beacon.flarm_id] = entry
                     log.debug(
                         "ground_contact",
                         flarm_id=beacon.flarm_id,
@@ -134,13 +160,22 @@ class FlightStateMachine:
                         speed=beacon.speed,
                         agl=round(agl),
                     )
+                entry["speeds"].append(beacon.speed)
                 return None  # On ground, not airborne yet
 
             # Aircraft is moving/airborne - check for takeoff
             is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
             is_too_high = agl > config.takeoff_max_agl_m
-            is_fast = beacon.speed >= config.takeoff_speed_kmh
-            was_on_ground = beacon.flarm_id in gc
+            entry = gc.get(beacon.flarm_id)
+            was_on_ground = entry is not None
+            if was_on_ground:
+                entry["speeds"].append(beacon.speed)
+                avg_speed = sum(entry["speeds"]) / len(entry["speeds"])
+            else:
+                avg_speed = beacon.speed
+            # Use rolling-average speed (smoothed over last N beacons) to
+            # decide takeoff — robust against single-beacon GPS glitches.
+            is_fast = avg_speed >= config.takeoff_speed_kmh
 
             if is_high and is_fast and not is_too_high and was_on_ground:
                 # Aircraft was on ground and is now airborne - takeoff!
@@ -177,6 +212,15 @@ class FlightStateMachine:
             else:
                 return None  # At home but not yet taking off
 
+        # Push speed into the rolling buffer and use the smoothed value for
+        # the landing decision (matches PyAcphFlightsLogbook's approach).
+        avg_speed = flight.push_speed(beacon.speed)
+        is_slow = avg_speed < config.landing_speed_kmh
+        # Additional safeguard: only count as landed if also within an
+        # altitude band around the airfield elevation. Prevents low+slow
+        # turn-overhead manoeuvres from triggering a false landing.
+        near_ground = abs(beacon.altitude - config.elevation_m) <= config.near_ground_band_m
+
         # Update flight position data
         flight.latitude = beacon.lat
         flight.longitude = beacon.lon
@@ -201,7 +245,8 @@ class FlightStateMachine:
         # --- State transitions ---
 
         # Landing detection at home airfield
-        if at_home and is_slow and flight.status in AIRBORNE_STATUSES:
+        # Requires: at home + smoothed speed below threshold + altitude band
+        if at_home and is_slow and near_ground and flight.status in AIRBORNE_STATUSES:
             if flight._slow_since == 0:
                 flight._slow_since = now_mono
             elif (now_mono - flight._slow_since) >= config.hysteresis_s:
@@ -328,8 +373,8 @@ class FlightStateMachine:
 
         # Clean up stale ground cache entries (> 2h old)
         for slug, gc in list(self._ground_cache.items()):
-            stale = [fid for fid, ts in gc.items()
-                     if (now_mono - ts) > self.GROUND_CACHE_MAX_AGE_S]
+            stale = [fid for fid, e in gc.items()
+                     if (now_mono - e["first_seen"]) > self.GROUND_CACHE_MAX_AGE_S]
             for fid in stale:
                 del gc[fid]
 

@@ -64,31 +64,35 @@ TENANT_UPDATE_PASSWORD = """
 # AIRFIELDS
 # =============================================
 
-AIRFIELD_INSERT = """
+_AIRFIELD_COLS = (
+    "id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m, "
+    "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s, "
+    "takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids, "
+    "winch_vs_threshold_ms, is_active, created_at, updated_at, "
+    "ST_AsGeoJSON(home_polygon) AS home_polygon"
+)
+
+AIRFIELD_INSERT = f"""
     INSERT INTO airfields (
         tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
         home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
-        takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids, winch_vs_threshold_ms
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-    RETURNING id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
-              home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
-              takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids,
-              winch_vs_threshold_ms, is_active, created_at
+        takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids, winch_vs_threshold_ms,
+        home_polygon
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+        CASE WHEN $16::text IS NULL THEN NULL
+             ELSE ST_SetSRID(ST_GeomFromGeoJSON($16), 4326) END
+    )
+    RETURNING {_AIRFIELD_COLS}
 """
 
-AIRFIELD_LIST_BY_TENANT = """
-    SELECT id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
-           home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
-           takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids,
-           winch_vs_threshold_ms, is_active, created_at, updated_at
+AIRFIELD_LIST_BY_TENANT = f"""
+    SELECT {_AIRFIELD_COLS}
     FROM airfields WHERE tenant_id = $1 ORDER BY name
 """
 
-AIRFIELD_BY_ID = """
-    SELECT id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
-           home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
-           takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids,
-           winch_vs_threshold_ms, is_active, created_at, updated_at
+AIRFIELD_BY_ID = f"""
+    SELECT {_AIRFIELD_COLS}
     FROM airfields WHERE id = $1
 """
 
@@ -98,19 +102,19 @@ AIRFIELD_BY_SLUG = """
     FROM airfields WHERE slug = $1 AND is_active = TRUE
 """
 
-AIRFIELD_UPDATE = """
+AIRFIELD_UPDATE = f"""
     UPDATE airfields SET
         name = $2, slug = $3, icao_code = $4, latitude = $5, longitude = $6,
         elevation_m = $7, home_radius_m = $8, ogn_filter_radius_km = $9,
         alarm_timeout_s = $10, signal_loss_timeout_s = $11,
         takeoff_speed_kmh = $12, takeoff_alt_offset_m = $13,
         tow_plane_flarm_ids = $14, winch_vs_threshold_ms = $15,
-        is_active = $16, updated_at = NOW()
+        is_active = $16,
+        home_polygon = CASE WHEN $17::text IS NULL THEN NULL
+                            ELSE ST_SetSRID(ST_GeomFromGeoJSON($17), 4326) END,
+        updated_at = NOW()
     WHERE id = $1
-    RETURNING id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
-              home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
-              takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids,
-              winch_vs_threshold_ms, is_active, updated_at
+    RETURNING {_AIRFIELD_COLS}
 """
 
 AIRFIELD_DELETE = """
