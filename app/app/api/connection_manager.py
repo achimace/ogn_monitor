@@ -139,6 +139,13 @@ class MonitorConnectionManager:
                 "reason": "landing_home",
                 "summary": _build_summary(flight_data),
             }
+        elif event_type == "dismissed":
+            ws_msg = {
+                "type": "flight_removed",
+                "flarmId": flarm_id,
+                "reason": "dismissed",
+                "summary": _build_summary(flight_data),
+            }
         elif event_type in ("alarm", "emergency", "outlanding", "diverted", "signal_lost"):
             ws_msg = self._build_alarm_message(event_type, flarm_id, flight_data, message_text)
         elif event_type == "signal_recovered":
@@ -170,7 +177,7 @@ class MonitorConnectionManager:
                     self._client_state[ws_id][flarm_id] = dict(flight_data)
 
         # Remove flight from client state on flight_removed
-        if event_type == "landing":
+        if event_type in ("landing", "dismissed"):
             for ws in conns:
                 ws_id = id(ws)
                 if ws_id in self._client_state:

@@ -7,8 +7,9 @@ No authentication required (public monitor).
 from datetime import datetime, timezone
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.dependencies import get_current_user
 from app.redis_client import get_redis
 
 log = structlog.get_logger()
@@ -194,6 +195,78 @@ async def get_today(slug: str):
             "highest": highest,
         },
     }
+
+
+@router.post("/{slug}/flights/{flarm_id}/dismiss")
+async def dismiss_flight(
+    slug: str,
+    flarm_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Dismiss a flight from the active monitor.
+
+    Removes the flight from the Redis hot state. If the flight was airborne
+    or landed, it is first archived to flight_log so nothing is lost.
+    The change is broadcast to all connected monitors via the standard
+    flight_removed WebSocket message.
+
+    Auth + ownership: only the tenant owning this airfield may dismiss.
+    """
+    from app.db.connection import get_db
+    from app.tracking.flight_state import FlightState
+    from app.tracking.state_synchronizer import StateSynchronizer
+    db = get_db()
+
+    # 1. Verify airfield ownership
+    row = await db.fetchrow(
+        "SELECT id, tenant_id FROM airfields WHERE slug = $1",
+        slug,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Flugplatz nicht gefunden")
+    if row["tenant_id"] != user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Kein Zugriff auf diesen Flugplatz")
+
+    redis = get_redis()
+
+    # 2. Load flight from hot state
+    data = await redis.hgetall(f"flight:{slug}:{flarm_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Flug nicht im Hot-State")
+
+    # 3. Archive to flight_log so the flight is preserved.
+    # Best-effort: failures here must not block the dismiss.
+    try:
+        flight = FlightState.from_redis(data, slug)
+        flight.airfield_id = row["id"]
+        await StateSynchronizer()._write_flight_log(db, flight, flight.status)
+    except Exception:
+        log.exception("dismiss_archive_failed", slug=slug, flarm_id=flarm_id)
+
+    # 4. Remove from hot state (set + hash)
+    pipe = redis.pipeline()
+    pipe.srem(f"flights:{slug}", flarm_id)
+    pipe.delete(f"flight:{slug}:{flarm_id}")
+    await pipe.execute()
+
+    # 5. Publish dismissed event so all monitors update live
+    import json
+    await redis.publish(
+        f"event:{slug}",
+        json.dumps({
+            "type": "dismissed",
+            "flarm_id": flarm_id,
+            "message": "Vom Flugleiter aus der Liste entfernt",
+        }),
+    )
+
+    log.info(
+        "flight_dismissed",
+        slug=slug,
+        flarm_id=flarm_id,
+        by=user["email"],
+    )
+    return {"ok": True, "flarm_id": flarm_id}
 
 
 def _iso(ts) -> str:

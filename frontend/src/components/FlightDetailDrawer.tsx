@@ -4,15 +4,21 @@
  * Desktop: slides in from the right.
  * Mobile:  slides up from the bottom.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import type { Flight } from '../types/flight'
+import { api, ApiError } from '../api/client'
+import { useAuth } from '../hooks/useAuth'
 
 interface Props {
   flight: Flight | null
+  airfieldSlug: string | null
   onClose: () => void
 }
 
-export default function FlightDetailDrawer({ flight, onClose }: Props) {
+export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Props) {
+  const { isAuthenticated } = useAuth()
+  const [dismissing, setDismissing] = useState(false)
+  const [dismissError, setDismissError] = useState('')
   useEffect(() => {
     if (!flight) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -21,6 +27,26 @@ export default function FlightDetailDrawer({ flight, onClose }: Props) {
   }, [flight, onClose])
 
   if (!flight) return null
+
+  async function handleDismiss() {
+    if (!flight || !airfieldSlug) return
+    const label = flight.registration || flight.flarmId
+    if (!confirm(
+      `${label} aus der Liste entfernen?\n\n` +
+      `Der Flug wird ins Flugbuch archiviert und verschwindet ` +
+      `bei allen Monitor-Nutzern aus der Live-Ansicht.`
+    )) return
+    setDismissing(true)
+    setDismissError('')
+    try {
+      await api.post(`/monitor/${airfieldSlug}/flights/${flight.flarmId}/dismiss`)
+      onClose()
+    } catch (e) {
+      setDismissError(e instanceof ApiError ? e.message : 'Entfernen fehlgeschlagen')
+    } finally {
+      setDismissing(false)
+    }
+  }
 
   const takeoff = formatTime(flight.takeoffTime)
   const landing = formatTime(flight.landingTime)
@@ -112,6 +138,27 @@ export default function FlightDetailDrawer({ flight, onClose }: Props) {
             >
               In Google Maps öffnen ↗
             </a>
+          </div>
+        )}
+
+        {/* Operations actions (only for logged-in airfield owners) */}
+        {isAuthenticated && airfieldSlug && (
+          <div className="px-5 py-4 border-t border-tower-border space-y-2">
+            {dismissError && (
+              <div className="text-red-300 text-xs">{dismissError}</div>
+            )}
+            <button
+              onClick={handleDismiss}
+              disabled={dismissing}
+              className="w-full bg-red-900/40 hover:bg-red-900/60 border border-red-700/50
+                text-red-200 text-sm font-medium rounded-lg px-4 py-2.5
+                transition-colors disabled:opacity-50"
+            >
+              {dismissing ? 'Wird entfernt...' : 'Aus Liste entfernen'}
+            </button>
+            <p className="text-[10px] text-gray-600 text-center">
+              Archiviert ins Flugbuch und blendet bei allen Monitoren aus.
+            </p>
           </div>
         )}
 

@@ -122,6 +122,7 @@ export default function MonitorPage() {
 
       <FlightDetailDrawer
         flight={selectedFlight ? (allFlights.find(f => f.flarmId === selectedFlight.flarmId) || selectedFlight) : null}
+        airfieldSlug={slug || null}
         onClose={() => setSelectedFlight(null)}
       />
 
