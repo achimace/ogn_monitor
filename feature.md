@@ -2005,6 +2005,139 @@ gesetzt ist, gilt weiterhin der Kreis. So ist die Migration nicht-brechend.
 
 ---
 
+## 4d. Tower-UX Ueberarbeitung (Betriebsleiter-Sicht)
+
+### Motivation
+
+Der Monitor soll dem Betriebsleiter im Tower (und Vereinsmitgliedern auf
+dem Smartphone) genau das liefern, was im Flugbetrieb wirklich gebraucht
+wird:
+
+- "Wer ist heute schon gestartet, wer ist gelandet, wer ist noch unterwegs?"
+- "Gibt es ein Problem mit jemand?" (Signalverlust, Aussenlandung)
+- Erst wenn ein Flugzeug **wieder neu** startet, wird ein neuer Flug
+  angelegt; der vorherige rutscht ins Flugbuch
+- Zuletzt gestartetes oder zuletzt gelandetes Flugzeug steht oben
+- Mobile-Nutzung muss erstklassig funktionieren
+
+### Status quo (Lueckenanalyse)
+
+1. **Gelandete Fluege verschwinden zu schnell.** `archive_flight()` wird
+   sofort beim Status `LANDING` ausgefuehrt → der Flug ist aus dem Hot-State
+   raus und in der GELANDET-Sektion nur kurz sichtbar
+2. **Sortierung nur nach Takeoff-Time** → der eben Gelandete steht nicht oben
+3. **Alarm-Logik einstufig.** Default `alarm_timeout_s=600` → nach 10 Min schon
+   Vollalarm. Der Betriebsleiter braucht zwei Stufen: "Signal weg" (gelb,
+   harmlos) vs "Vermisst" (rot, echte Aktion noetig)
+4. **Keine Tagesuebersicht im Monitor.** Live-Tabelle (nur aktiv) und Flugbuch
+   (separate Seite) sind getrennt
+5. **Mobile unbenutzbar.** FlightTable hat fixe Spaltenbreiten ohne
+   Responsive-Breakpoints
+6. **Kein Detail-Drilldown.** Klick auf einen Flug → keine Reaktion
+
+### Phase 1 - Kern-Semantik korrigieren
+
+**1.1 Sticky landed flights**
+- Beim Erkennen einer Landung wird der Flug **nicht** sofort archiviert
+- Status `LANDING` bleibt im Hot-State sichtbar mit Endzeit + Flugdauer
+- Erst wenn dasselbe Flarm-ID **wieder startet**, wird der vorherige Flug
+  in `flight_log` archiviert und durch den neuen Flug ersetzt
+- Sicherheits-Cleanup: Fluege im Status `LANDING`, die aelter als 24 h sind,
+  werden vom Timeout-Check archiviert
+
+**1.2 Zweistufige Alarm-Eskalation**
+- `signal_loss_timeout_s` (Default 300 s = 5 min): Status `SIGNAL_LOST`,
+  gelbe Warnung, "Kein Signal seit X min"
+- `alarm_timeout_s` (Default 7200 s = 2 h): Status `ALARM`, rot, "Vermisst seit X"
+- Beide werden separat per Konfiguration einstellbar
+- Bei Signal-Recovery wird der Status zurueck auf `FLYING` gesetzt
+
+**1.3 Sortierung "zuletzt aktiv"**
+- Frontend sortiert nach `max(landingTime, takeoffTime)` desc
+- Sektion-Reihenfolge unveraendert (Notfall > Alarm > Aussen > Schlepp >
+  Fliegend > Gelandet), aber innerhalb jeder Sektion ist der zuletzt aktive
+  Eintrag oben
+
+### Phase 2 - "Heute"-Tagesuebersicht
+
+**2.1 Backend-Endpoint `/api/monitor/{slug}/today`**
+- Liefert alle Fluege des heutigen Tages (UTC):
+  - aktive Fluege aus Redis (inkl. sticky landed)
+  - heute bereits archivierte Fluege aus PostgreSQL
+- Merging via `flarm_id`: ein Eintrag pro Flugzeug (der jeweils aktuellste)
+- Sortiert nach `max(landing_time, takeoff_time)` desc
+- Cache-Zeit: 5 s (Reduktion der DB-Last)
+
+**2.2 Tages-Statistiken im Monitor-Header**
+- Anzahl Starts heute, Anzahl gelandet, Anzahl in der Luft
+- Laengster Flug heute (Registration + Dauer)
+- Hoechster Flug heute (Registration + Hoehe)
+- Verteilung Startarten (Winde / F-Schlepp / Eigen) als kompakte Pille
+
+### Phase 3 - Mobile + Detail-Drilldown
+
+**3.1 Responsive FlightTable**
+- Breakpoint < md (768 px): Karten-Layout statt Tabelle
+- Pro Flug eine Karte mit:
+  - Status farbig oben (grosse Touch-Flaeche)
+  - Kennzeichen + Wettbewerbszeichen gross
+  - QDR / Distanz / Hoehe in 3-Spalten-Grid
+  - Zeit + Startart + Dauer kompakt
+- Sektions-Header bleiben (Notfall etc.)
+- Tap = Detail-Drawer oeffnen
+
+**3.2 Detail-Drawer pro Flug**
+- Slide-in von rechts (Desktop) bzw. von unten (Mobile)
+- Inhalt:
+  - Flugzeug-Info (Reg, Modell, Kennzeichen, Halter falls vorhanden)
+  - Live-Daten (Position, Hoehe, Speed, VS, QDR, Distanz)
+  - Zeitleiste (Start, Dauer, Letzte Position vor X Sek)
+  - Mini-Karte mit letzter Position
+  - Aktionen: "Zentrieren auf Karte", spaeter mehr
+- Schliessen per Swipe (Mobile) oder Esc/Klick auseinander
+
+**3.3 Header mobile-tauglich**
+- Stat-Pills wrappen auf Mobile
+- View-Toggle (Tabelle/Karte/Split) wird zu Tabs
+- Uhr + Connection-Status kompakter
+
+### Phase 4 - Komfort und Notfall-Workflow
+
+**4.1 Pilot/Halter pro Flugzeug**
+- Erweiterung `tenant_aircraft`: `pilot_name`, `pilot_phone`, `holder_name`
+- Im Detail-Drawer als anklickbare `tel:`-Links
+- Im Aussenlandungs-Modus prominent angezeigt
+
+**4.2 Manueller Override**
+- Buttons im Detail-Drawer:
+  - "Pilot per Funk gemeldet → als gelandet markieren" (raeumt Alarm)
+  - "Falscher Start → ignorieren" (entfernt aus Liste)
+- Aktionen werden geloggt mit User-ID
+
+**4.3 Aussenlandungs-Grossansicht**
+- Wenn Status `OUTLANDING`: separates Modal/Vollbild
+- Position gross lesbar (Lat/Lon zum Vorlesen ans Telefon)
+- Google-Maps-Link zum Teilen
+- Pilot/Halter-Telefon einblenden falls vorhanden
+- Zeitstempel und Hoehe der letzten Position
+
+**4.4 Optional: Notfall-Sound + Vibration**
+- Web Audio API: Ton beim Statuswechsel zu `ALARM` oder `EMERGENCY`
+- Vibration API auf Mobile
+- Per Tap aktivierbar (Browser-Policy verlangt User-Interaktion)
+- Pro Tab speicherbar via localStorage
+
+### Konfigurationsfelder pro Airfield (Erweiterung)
+
+```sql
+ALTER TABLE airfields ADD COLUMN
+    signal_loss_timeout_s INT DEFAULT 300,    -- 5 min: gelbe Warnung
+    alarm_timeout_s       INT DEFAULT 7200;   -- 2 h: roter Alarm
+-- (signal_loss_timeout_s existiert teilweise schon, Defaults werden angepasst)
+```
+
+---
+
 ## 5. Frontend (Modernes Dashboard)
 
 ### Technologie

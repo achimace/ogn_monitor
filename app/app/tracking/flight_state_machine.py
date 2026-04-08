@@ -43,9 +43,15 @@ class AirfieldConfig:
     takeoff_alt_offset_m: int = 50
     takeoff_max_agl_m: int = 1000
     landing_speed_kmh: int = 50
-    alarm_timeout_s: int = 600
-    signal_loss_timeout_s: int = 300
+    # Two-stage absence escalation:
+    #   signal_loss_timeout_s → yellow "SIGNAL_LOST" (harmless, just info)
+    #   alarm_timeout_s       → red "ALARM" (real action required)
+    signal_loss_timeout_s: int = 300   # 5 min
+    alarm_timeout_s: int = 7200        # 2 h
     outlanding_timeout_s: int = 300
+    # Sticky landed: flights stay in LANDING state until either the same
+    # aircraft starts again, OR this many seconds elapse (safety cleanup).
+    sticky_landed_max_age_s: int = 86400  # 24 h
     hysteresis_s: int = 10
     ogn_filter_radius_km: int = 500
     tow_plane_flarm_ids: list[str] | None = None
@@ -212,6 +218,47 @@ class FlightStateMachine:
             else:
                 return None  # At home but not yet taking off
 
+        # ----- Sticky-landed restart detection -----
+        # An already-landed flight stays in the hot state with status LANDING
+        # so the tower controller still sees it. Only when the SAME aircraft
+        # starts again do we archive the old flight and create a new one.
+        elif flight.status == FlightStatus.LANDING:
+            is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
+            is_too_high = agl > config.takeoff_max_agl_m
+            is_fast = beacon.speed >= config.takeoff_speed_kmh
+            if at_home and is_high and is_fast and not is_too_high:
+                # Restart detected: archive the old flight and replace it.
+                old_flight = flight
+                self._emit_event(
+                    slug, "flight_restarted", beacon.flarm_id, old_flight,
+                    message="Flugzeug startet erneut",
+                )
+                log.info(
+                    "flight_restarted",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    previous_landing=old_flight.landing_time,
+                )
+                flight = FlightState(
+                    flarm_id=beacon.flarm_id,
+                    airfield_slug=slug,
+                    airfield_id=config.id,
+                    status=FlightStatus.TAKEOFF,
+                    takeoff_time=now_iso,
+                )
+                self.flights[slug][beacon.flarm_id] = flight
+                self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
+            else:
+                # Still landed - just refresh last_seen and basic position
+                flight.latitude = beacon.lat
+                flight.longitude = beacon.lon
+                flight.altitude_m = beacon.altitude
+                flight.altitude_agl = agl
+                flight.speed_kmh = beacon.speed
+                flight.last_seen = now_iso
+                flight.elapsed_s = 0
+                return flight
+
         # Push speed into the rolling buffer and use the smoothed value for
         # the landing decision (matches PyAcphFlightsLogbook's approach).
         avg_speed = flight.push_speed(beacon.speed)
@@ -317,7 +364,22 @@ class FlightStateMachine:
                 continue
 
             for flarm_id, flight in list(af_flights.items()):
+                # Sticky landed: keep the entry visible until either a restart
+                # happens (handled in process_beacon) or the safety cleanup
+                # window passes. Use elapsed_s as time-since-last-beacon.
                 if flight.status == FlightStatus.LANDING:
+                    flight.elapsed_s += 30
+                    if flight.elapsed_s > config.sticky_landed_max_age_s:
+                        self._emit_event(
+                            slug, "sticky_landed_expired", flarm_id, flight,
+                            message="Sticky-landed cleanup nach 24 h",
+                        )
+                        log.info(
+                            "sticky_landed_expired",
+                            flarm_id=flarm_id,
+                            airfield=slug,
+                        )
+                        changed.append(flight)
                     continue
 
                 # Calculate elapsed since last beacon
@@ -330,14 +392,38 @@ class FlightStateMachine:
 
                 flight.elapsed_s += 30  # Approximate increment
 
-                # ALARM: No signal for alarm_timeout_s
+                # Stage 1: SIGNAL_LOST (yellow). Triggered when a flying
+                # aircraft hasn't been heard from for signal_loss_timeout_s.
+                if (flight.elapsed_s > config.signal_loss_timeout_s
+                        and flight.status in (FlightStatus.FLYING,
+                                              FlightStatus.TAKEOFF,
+                                              FlightStatus.TOWING)):
+                    flight.status = FlightStatus.SIGNAL_LOST
+                    self._emit_event(
+                        slug, "signal_lost", flarm_id, flight,
+                        message=(
+                            f"Kein Signal seit {flight.elapsed_s // 60} Min. "
+                            f"Letzte Position: {flight.distance_m/1000:.1f}km "
+                            f"{flight.bearing_text}, {flight.altitude_m:.0f}m"
+                        ),
+                    )
+                    log.info(
+                        "signal_lost",
+                        flarm_id=flarm_id,
+                        airfield=slug,
+                        elapsed_s=flight.elapsed_s,
+                    )
+                    changed.append(flight)
+
+                # Stage 2: ALARM (red). Escalation from SIGNAL_LOST after
+                # alarm_timeout_s — this is the "really missing" state.
                 if (flight.elapsed_s > config.alarm_timeout_s
-                        and flight.status in AIRBORNE_STATUSES):
+                        and flight.status == FlightStatus.SIGNAL_LOST):
                     flight.status = FlightStatus.ALARM
                     self._emit_event(
                         slug, "alarm", flarm_id, flight,
                         message=(
-                            f"Kein Signal seit {flight.elapsed_s // 60} Min. "
+                            f"VERMISST seit {flight.elapsed_s // 60} Min. "
                             f"Letzte Position: {flight.distance_m/1000:.1f}km "
                             f"{flight.bearing_text}, {flight.altitude_m:.0f}m, "
                             f"QDR {flight.qdr_deg:.0f}°"

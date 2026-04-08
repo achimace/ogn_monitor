@@ -35,9 +35,29 @@ export interface AlarmEvent {
   acknowledged: boolean
 }
 
+export interface DayStats {
+  startsToday: number
+  landedToday: number
+  inAir: number
+  byLaunch: Record<string, number>
+  longest: { reg: string; durationS: number }
+  highest: { reg: string; altitudeM: number }
+}
+
+const EMPTY_DAY_STATS: DayStats = {
+  startsToday: 0,
+  landedToday: 0,
+  inAir: 0,
+  byLaunch: {},
+  longest: { reg: '', durationS: 0 },
+  highest: { reg: '', altitudeM: 0 },
+}
+
 interface MonitorState {
   slug: string | null
   flights: Map<string, Flight>
+  archivedToday: Flight[]  // archived earlier today, not in hot state
+  dayStats: DayStats
   stats: FlightStats
   alarms: AlarmEvent[]
   connected: boolean
@@ -49,6 +69,7 @@ interface MonitorState {
   applyDelta: (flarmId: string, delta: FlightDelta) => void
   addFlight: (flight: Flight) => void
   removeFlight: (flarmId: string) => void
+  setTodayData: (archived: Flight[], stats: DayStats) => void
   addAlarm: (alarm: Omit<AlarmEvent, 'acknowledged'>) => void
   acknowledgeAlarm: (flarmId: string) => void
   clearAlarm: (flarmId: string) => void
@@ -57,6 +78,7 @@ interface MonitorState {
   // Computed
   getFlightsByStatus: (...statuses: Flight['status'][]) => Flight[]
   getAlarmFlights: () => Flight[]
+  getCombinedFlights: () => Flight[]
 }
 
 function normalizeFlightData(raw: Record<string, unknown>): Flight {
@@ -117,6 +139,8 @@ function recalcStats(flights: Map<string, Flight>): FlightStats {
 export const useMonitorStore = create<MonitorState>((set, get) => ({
   slug: null,
   flights: new Map(),
+  archivedToday: [],
+  dayStats: EMPTY_DAY_STATS,
   stats: { flying: 0, landed: 0, alarm: 0, outlanding: 0 },
   alarms: [],
   connected: false,
@@ -196,7 +220,19 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     }))
   },
 
+  setTodayData: (archived, stats) => {
+    set({ archivedToday: archived, dayStats: stats })
+  },
+
   setConnected: (connected) => set({ connected }),
+
+  getCombinedFlights: () => {
+    const live = Array.from(get().flights.values())
+    const liveIds = new Set(live.map(f => f.flarmId))
+    // Append archived entries that are not currently in the hot state
+    const extra = get().archivedToday.filter(f => !liveIds.has(f.flarmId))
+    return [...live, ...extra]
+  },
 
   getFlightsByStatus: (...statuses) => {
     const result: Flight[] = []
