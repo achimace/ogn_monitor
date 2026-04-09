@@ -5,6 +5,21 @@
 import { useState, useEffect } from 'react'
 import { api, ApiError } from '../api/client'
 
+/** Local-date ISO (YYYY-MM-DD), matching what <input type="date"> uses. */
+function localIso(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+const todayIso = localIso(new Date())
+
+function shiftDate(iso: string, deltaDays: number): string {
+  const d = new Date(iso + 'T12:00:00')   // noon avoids DST edge cases
+  d.setDate(d.getDate() + deltaDays)
+  return localIso(d)
+}
+
 interface FlightLog {
   id: number
   registration: string
@@ -31,7 +46,9 @@ export default function FlightLogPage() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
-  const [dateFilter, setDateFilter] = useState('')
+  // Initially open the log on today's date so the user always sees
+  // the current day on first load.
+  const [dateFilter, setDateFilter] = useState(todayIso)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [exporting, setExporting] = useState(false)
@@ -110,12 +127,33 @@ export default function FlightLogPage() {
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold text-white">Flugbuch</h2>
         <div className="flex items-center gap-3">
-          <input
-            type="date"
-            value={dateFilter}
-            onChange={(e) => { setDateFilter(e.target.value); setPage(1) }}
-            className="bg-tower-bg border border-tower-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-tower-qdr"
-          />
+          <div className="flex items-stretch rounded-lg border border-tower-border overflow-hidden">
+            <button
+              type="button"
+              onClick={() => { setDateFilter(shiftDate(dateFilter || todayIso, -1)); setPage(1) }}
+              title="Ein Tag zurueck"
+              className="px-3 bg-tower-bg hover:bg-tower-surface text-gray-300 hover:text-white text-base font-bold transition-colors"
+            >
+              ‹
+            </button>
+            <input
+              type="date"
+              value={dateFilter}
+              max={todayIso}
+              onChange={(e) => { setDateFilter(e.target.value); setPage(1) }}
+              className="bg-tower-bg px-3 py-2 text-white text-sm focus:outline-none border-l border-r border-tower-border"
+            />
+            <button
+              type="button"
+              onClick={() => { setDateFilter(shiftDate(dateFilter || todayIso, 1)); setPage(1) }}
+              disabled={!dateFilter || dateFilter >= todayIso}
+              title="Ein Tag vor"
+              className="px-3 bg-tower-bg hover:bg-tower-surface text-gray-300 hover:text-white text-base font-bold transition-colors
+                disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-300 disabled:hover:bg-tower-bg"
+            >
+              ›
+            </button>
+          </div>
           <button
             onClick={handleExportCsv}
             disabled={exporting}
