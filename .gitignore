@@ -33,6 +33,11 @@ frontend/.vite/
 pgdata/
 redisdata/
 
+# Database dumps (may contain personal data — never commit)
+backups/
+*.dump
+*.sql.gz
+
 # SSL certificates
 nginx/ssl/*.pem
 nginx/ssl/*.key
