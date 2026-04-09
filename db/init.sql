@@ -224,6 +224,9 @@ CREATE INDEX idx_flight_log_airfield ON flight_log(airfield_id);
 CREATE INDEX idx_flight_log_date ON flight_log(takeoff_time);
 CREATE INDEX idx_flight_log_flarm ON flight_log(flarm_id);
 CREATE INDEX idx_flight_log_registration ON flight_log(registration);
+ALTER TABLE flight_log
+    ADD CONSTRAINT flight_log_unique_takeoff
+    UNIQUE (airfield_id, flarm_id, takeoff_time);
 
 -- =============================================
 -- FLIGHT PROFILE SNAPSHOT (bei Alarm gespeichert)

@@ -225,6 +225,12 @@ class StateSynchronizer:
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
                 )
+                ON CONFLICT (airfield_id, flarm_id, takeoff_time) DO UPDATE SET
+                    landing_time = COALESCE(EXCLUDED.landing_time, flight_log.landing_time),
+                    max_altitude_m = GREATEST(EXCLUDED.max_altitude_m, flight_log.max_altitude_m),
+                    max_distance_m = GREATEST(EXCLUDED.max_distance_m, flight_log.max_distance_m),
+                    launch_type = COALESCE(NULLIF(EXCLUDED.launch_type, 'unknown'), flight_log.launch_type),
+                    landing_type = EXCLUDED.landing_type
                 """,
                 flight.airfield_id,
                 flight.flarm_id,
