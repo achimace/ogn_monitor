@@ -119,6 +119,8 @@ class AirfieldCreateRequest(BaseModel):
     takeoff_alt_offset_m: int = Field(50, ge=10, le=200)
     tow_plane_flarm_ids: list[str] = Field(default_factory=list)
     winch_vs_threshold_ms: float = Field(8.0, ge=3.0, le=15.0)
+    landed_visible_minutes: int = Field(1440, ge=1, le=10080)  # 1min..7d
+    monitor_strip_fields: list[str] = Field(default_factory=list)
     home_polygon: dict | None = None
 
     @field_validator("home_polygon")
@@ -143,6 +145,8 @@ class AirfieldUpdateRequest(BaseModel):
     tow_plane_flarm_ids: list[str] = Field(default_factory=list)
     winch_vs_threshold_ms: float = Field(8.0, ge=3.0, le=15.0)
     is_active: bool = True
+    landed_visible_minutes: int = Field(1440, ge=1, le=10080)
+    monitor_strip_fields: list[str] = Field(default_factory=list)
     home_polygon: dict | None = None
 
     @field_validator("home_polygon")
@@ -169,6 +173,8 @@ class AirfieldResponse(BaseModel):
     tow_plane_flarm_ids: list[str]
     winch_vs_threshold_ms: float
     is_active: bool
+    landed_visible_minutes: int = 1440
+    monitor_strip_fields: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     home_polygon: dict | None = None

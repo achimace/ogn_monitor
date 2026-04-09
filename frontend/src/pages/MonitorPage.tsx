@@ -24,6 +24,7 @@ export default function MonitorPage() {
   const { slug } = useParams<{ slug: string }>()
   const getCombinedFlights = useMonitorStore((s) => s.getCombinedFlights)
   const dayStats = useMonitorStore((s) => s.dayStats)
+  const stripFields = useMonitorStore((s) => s.stripFields)
   // Subscribe to flights + archivedToday so combined list is reactive
   useMonitorStore((s) => s.flights)
   useMonitorStore((s) => s.archivedToday)
@@ -98,7 +99,7 @@ export default function MonitorPage() {
 
         {view === 'table' && (
           <div className="flex-1 overflow-auto px-4 pb-12">
-            <FlightTable flights={allFlights} onSelect={setSelectedFlight} />
+            <FlightTable flights={allFlights} onSelect={setSelectedFlight} stripFields={stripFields} />
           </div>
         )}
 
@@ -111,7 +112,7 @@ export default function MonitorPage() {
         {view === 'split' && (
           <div className="flex-1 flex gap-4 px-4 pb-12 min-h-0">
             <div className="w-1/2 overflow-auto">
-              <FlightTable flights={allFlights} onSelect={setSelectedFlight} />
+              <FlightTable flights={allFlights} onSelect={setSelectedFlight} stripFields={stripFields} />
             </div>
             <div className="w-1/2">
               <MapView flights={allFlights} />

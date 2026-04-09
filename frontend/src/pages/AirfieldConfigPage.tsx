@@ -25,7 +25,25 @@ interface Airfield {
   winch_vs_threshold_ms: number
   is_active: boolean
   home_polygon: GeoJsonPolygon | null
+  landed_visible_minutes: number
+  monitor_strip_fields: string[]
 }
+
+const ALL_STRIP_FIELDS: { id: string; label: string }[] = [
+  { id: 'competition_sign', label: 'Wettbewerbszeichen' },
+  { id: 'aircraft_model',   label: 'Flugzeug-Typ' },
+  { id: 'takeoff_time',     label: 'Startzeit' },
+  { id: 'landing_time',     label: 'Landezeit' },
+  { id: 'duration',         label: 'Flugdauer' },
+  { id: 'launch_type',      label: 'Startart' },
+  { id: 'qdr',              label: 'QDR / Peilung' },
+  { id: 'distance',         label: 'Distanz' },
+  { id: 'altitude',         label: 'Hoehe MSL' },
+  { id: 'agl',              label: 'Hoehe AGL' },
+  { id: 'speed',            label: 'Geschwindigkeit' },
+  { id: 'vs',               label: 'Steigen/Sinken' },
+  { id: 'track',            label: 'Kurs' },
+]
 
 type AirfieldForm = Omit<Airfield, 'id' | 'tenant_id'> & { id?: string }
 
@@ -46,6 +64,8 @@ const EMPTY_FORM: AirfieldForm = {
   winch_vs_threshold_ms: 8.0,
   is_active: true,
   home_polygon: null,
+  landed_visible_minutes: 1440,
+  monitor_strip_fields: ALL_STRIP_FIELDS.map(f => f.id),
 }
 
 export default function AirfieldConfigPage() {
@@ -92,6 +112,8 @@ export default function AirfieldConfigPage() {
       winch_vs_threshold_ms: af.winch_vs_threshold_ms,
       is_active: af.is_active,
       home_polygon: af.home_polygon ?? null,
+      landed_visible_minutes: af.landed_visible_minutes ?? 1440,
+      monitor_strip_fields: af.monitor_strip_fields ?? ALL_STRIP_FIELDS.map(f => f.id),
     })
     setTowPlaneInput((af.tow_plane_flarm_ids || []).join(', '))
     setError('')
@@ -127,6 +149,8 @@ export default function AirfieldConfigPage() {
       winch_vs_threshold_ms: form.winch_vs_threshold_ms,
       is_active: form.is_active,
       home_polygon: form.home_polygon,
+      landed_visible_minutes: form.landed_visible_minutes,
+      monitor_strip_fields: form.monitor_strip_fields,
     }
   }
 
@@ -200,20 +224,55 @@ export default function AirfieldConfigPage() {
 
       {/* Airfield selector (if multiple) */}
       {airfields.length > 1 && (
-        <div className="flex gap-2 mb-4">
+        <div className="flex flex-wrap gap-2 mb-4">
           {airfields.map(af => (
-            <button
+            <div
               key={af.id}
-              onClick={() => selectAirfield(af)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+              className={`flex items-stretch rounded-lg overflow-hidden border transition-colors ${
                 form.id === af.id
-                  ? 'bg-tower-qdr text-white'
-                  : 'bg-tower-surface border border-tower-border text-gray-400 hover:text-white'
+                  ? 'border-tower-qdr'
+                  : 'border-tower-border'
               }`}
             >
-              {af.name}
-            </button>
+              <button
+                onClick={() => selectAirfield(af)}
+                className={`px-3 py-1.5 text-sm font-medium transition-colors ${
+                  form.id === af.id
+                    ? 'bg-tower-qdr text-white'
+                    : 'bg-tower-surface text-gray-400 hover:text-white'
+                }`}
+              >
+                {af.name}
+              </button>
+              <a
+                href={`/monitor/${af.slug}`}
+                target="_blank"
+                rel="noopener"
+                title={`Tower-Monitor ${af.name} oeffnen`}
+                className="px-2 flex items-center text-xs font-medium bg-tower-surface
+                  text-gray-500 hover:text-tower-qdr border-l border-tower-border
+                  transition-colors"
+              >
+                Monitor ↗
+              </a>
+            </div>
           ))}
+        </div>
+      )}
+
+      {/* Tower-Monitor link for the currently selected airfield */}
+      {form.id && form.slug && (
+        <div className="mb-4">
+          <a
+            href={`/monitor/${form.slug}`}
+            target="_blank"
+            rel="noopener"
+            className="inline-flex items-center gap-2 bg-tower-qdr/10 hover:bg-tower-qdr/20
+              border border-tower-qdr/40 text-tower-qdr text-sm font-semibold
+              rounded-lg px-4 py-2 transition-colors"
+          >
+            Tower-Monitor "{form.name}" oeffnen ↗
+          </a>
         </div>
       )}
 
@@ -273,6 +332,51 @@ export default function AirfieldConfigPage() {
                 className="w-full bg-tower-bg border border-tower-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-tower-qdr font-mono"
               />
               <p className="text-xs text-gray-500 mt-1">FLARM-IDs der Schleppflugzeuge fuer automatische F-Schlepp-Erkennung</p>
+            </div>
+          </fieldset>
+
+          {/* Monitor display config */}
+          <fieldset>
+            <legend className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3">
+              Monitor-Anzeige
+            </legend>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <FormField
+                label="Gelandet sichtbar (Min.)"
+                type="number"
+                value={String(form.landed_visible_minutes)}
+                onChange={v => setField('landed_visible_minutes', parseInt(v) || 1440)}
+                hint="1 = 1 Minute, 1440 = 24 Stunden"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-400 mb-2">
+                Felder auf dem Flugstreifen
+              </label>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                {ALL_STRIP_FIELDS.map(f => {
+                  const checked = form.monitor_strip_fields.includes(f.id)
+                  return (
+                    <label key={f.id} className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = e.target.checked
+                            ? [...form.monitor_strip_fields, f.id]
+                            : form.monitor_strip_fields.filter(x => x !== f.id)
+                          setField('monitor_strip_fields', next)
+                        }}
+                        className="w-4 h-4 accent-tower-qdr"
+                      />
+                      {f.label}
+                    </label>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Kennzeichen und Status werden immer angezeigt.
+              </p>
             </div>
           </fieldset>
 

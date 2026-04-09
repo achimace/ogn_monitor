@@ -30,13 +30,17 @@ class RedisWriter:
         self._redis = redis
         self._ttl = settings.redis_hot_state_ttl
 
-    async def update_flight(self, airfield_slug: str, flarm_id: str, data: dict[str, Any]) -> None:
+    async def update_flight(self, airfield_slug: str, flarm_id: str,
+                            data: dict[str, Any], ttl: int | None = None) -> None:
         """Write flight state hash and update active flights set.
 
         Args:
             airfield_slug: Airfield identifier.
             flarm_id: FLARM device ID.
             data: Dict of field->value pairs for HSET.
+            ttl: Optional override (seconds). If not given, the default
+                 hot-state TTL is used. Sticky-landed flights pass a longer
+                 value to keep the entry alive while no beacons arrive.
         """
         key = f"flight:{airfield_slug}:{flarm_id}"
 
@@ -45,7 +49,7 @@ class RedisWriter:
 
         pipe = self._redis.pipeline()
         pipe.hset(key, mapping=str_data)
-        pipe.expire(key, self._ttl)
+        pipe.expire(key, ttl if ttl is not None else self._ttl)
         pipe.sadd(f"flights:{airfield_slug}", flarm_id)
         pipe.sadd("active_airfields", airfield_slug)
         await pipe.execute()

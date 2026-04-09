@@ -53,11 +53,19 @@ const EMPTY_DAY_STATS: DayStats = {
   highest: { reg: '', altitudeM: 0 },
 }
 
+export const ALL_STRIP_FIELDS = [
+  'competition_sign', 'aircraft_model', 'takeoff_time', 'landing_time',
+  'duration', 'launch_type', 'qdr', 'distance', 'altitude', 'agl',
+  'speed', 'vs', 'track',
+] as const
+export type StripField = typeof ALL_STRIP_FIELDS[number]
+
 interface MonitorState {
   slug: string | null
   flights: Map<string, Flight>
   archivedToday: Flight[]  // archived earlier today, not in hot state
   dayStats: DayStats
+  stripFields: StripField[]
   stats: FlightStats
   alarms: AlarmEvent[]
   connected: boolean
@@ -69,7 +77,7 @@ interface MonitorState {
   applyDelta: (flarmId: string, delta: FlightDelta) => void
   addFlight: (flight: Flight) => void
   removeFlight: (flarmId: string) => void
-  setTodayData: (archived: Flight[], stats: DayStats) => void
+  setTodayData: (archived: Flight[], stats: DayStats, stripFields: StripField[]) => void
   addAlarm: (alarm: Omit<AlarmEvent, 'acknowledged'>) => void
   acknowledgeAlarm: (flarmId: string) => void
   clearAlarm: (flarmId: string) => void
@@ -141,6 +149,7 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   flights: new Map(),
   archivedToday: [],
   dayStats: EMPTY_DAY_STATS,
+  stripFields: [...ALL_STRIP_FIELDS],
   stats: { flying: 0, landed: 0, alarm: 0, outlanding: 0 },
   alarms: [],
   connected: false,
@@ -220,8 +229,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     }))
   },
 
-  setTodayData: (archived, stats) => {
-    set({ archivedToday: archived, dayStats: stats })
+  setTodayData: (archived, stats, stripFields) => {
+    set({ archivedToday: archived, dayStats: stats, stripFields })
   },
 
   setConnected: (connected) => set({ connected }),

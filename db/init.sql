@@ -46,6 +46,12 @@ CREATE TABLE airfields (
     takeoff_alt_offset_m    INT DEFAULT 50,
     tow_plane_flarm_ids     TEXT[] DEFAULT '{}',
     winch_vs_threshold_ms   DOUBLE PRECISION DEFAULT 8.0,
+    landed_visible_minutes  INT DEFAULT 1440,           -- 24h sticky-landed
+    monitor_strip_fields    TEXT[] DEFAULT ARRAY[
+        'competition_sign','aircraft_model','takeoff_time','landing_time',
+        'duration','launch_type','qdr','distance','altitude','agl',
+        'speed','vs','track'
+    ],
     is_active               BOOLEAN DEFAULT TRUE,
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     updated_at              TIMESTAMPTZ DEFAULT NOW(),
@@ -120,7 +126,7 @@ CREATE INDEX idx_registry_registration ON aircraft_registry(registration);
 -- =============================================
 CREATE TABLE flight_status (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    airfield_id             UUID NOT NULL REFERENCES airfields(id),
+    airfield_id             UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
     flarm_id                VARCHAR(16) NOT NULL,
     registration            VARCHAR(16),
     competition_sign        VARCHAR(4),
@@ -178,7 +184,7 @@ CREATE INDEX idx_flight_status_active ON flight_status(status) WHERE status BETW
 -- =============================================
 CREATE TABLE flight_log (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    airfield_id             UUID NOT NULL REFERENCES airfields(id),
+    airfield_id             UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
     flarm_id                VARCHAR(16) NOT NULL,
     registration            VARCHAR(16),
     competition_sign        VARCHAR(4),
@@ -226,7 +232,7 @@ CREATE TABLE flight_profile_snapshot (
     id                      UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     flight_status_id        UUID REFERENCES flight_status(id),
     flarm_id                VARCHAR(16) NOT NULL,
-    airfield_id             UUID NOT NULL REFERENCES airfields(id),
+    airfield_id             UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
     scenario                VARCHAR(16) NOT NULL,
     severity                VARCHAR(8) NOT NULL,
     abnormal_flags          TEXT[],

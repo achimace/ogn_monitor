@@ -8,7 +8,7 @@
  * supplements with archived data and aggregates.
  */
 import { useEffect } from 'react'
-import { useMonitorStore, type DayStats } from '../store/monitorStore'
+import { useMonitorStore, type DayStats, type StripField, ALL_STRIP_FIELDS } from '../store/monitorStore'
 import type { Flight } from '../types/flight'
 
 const POLL_INTERVAL_MS = 30_000
@@ -24,6 +24,10 @@ interface TodayResponse {
     by_launch: Record<string, number>
     longest: { reg: string; duration_s: number }
     highest: { reg: string; altitude_m: number }
+  }
+  config?: {
+    strip_fields?: string[]
+    landed_visible_minutes?: number
   }
 }
 
@@ -89,7 +93,10 @@ export function useTodayPoll(slug: string | null) {
           },
         }
 
-        setTodayData(archived, stats)
+        const allowed = new Set<string>(ALL_STRIP_FIELDS)
+        const stripFields = (data.config?.strip_fields || ALL_STRIP_FIELDS)
+          .filter((f) => allowed.has(f)) as StripField[]
+        setTodayData(archived, stats, stripFields)
       } catch {
         // ignore - WebSocket is the primary live source
       }

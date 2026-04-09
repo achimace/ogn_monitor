@@ -68,7 +68,8 @@ _AIRFIELD_COLS = (
     "id, tenant_id, name, slug, icao_code, latitude, longitude, elevation_m, "
     "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s, "
     "takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids, "
-    "winch_vs_threshold_ms, is_active, created_at, updated_at, "
+    "winch_vs_threshold_ms, landed_visible_minutes, monitor_strip_fields, "
+    "is_active, created_at, updated_at, "
     "ST_AsGeoJSON(home_polygon) AS home_polygon"
 )
 
@@ -77,11 +78,12 @@ AIRFIELD_INSERT = f"""
         tenant_id, name, slug, icao_code, latitude, longitude, elevation_m,
         home_radius_m, ogn_filter_radius_km, alarm_timeout_s, signal_loss_timeout_s,
         takeoff_speed_kmh, takeoff_alt_offset_m, tow_plane_flarm_ids, winch_vs_threshold_ms,
-        home_polygon
+        home_polygon, landed_visible_minutes, monitor_strip_fields
     ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
         CASE WHEN $16::text IS NULL THEN NULL
-             ELSE ST_SetSRID(ST_GeomFromGeoJSON($16), 4326) END
+             ELSE ST_SetSRID(ST_GeomFromGeoJSON($16), 4326) END,
+        $17, $18
     )
     RETURNING {_AIRFIELD_COLS}
 """
@@ -112,6 +114,8 @@ AIRFIELD_UPDATE = f"""
         is_active = $16,
         home_polygon = CASE WHEN $17::text IS NULL THEN NULL
                             ELSE ST_SetSRID(ST_GeomFromGeoJSON($17), 4326) END,
+        landed_visible_minutes = $18,
+        monitor_strip_fields = $19,
         updated_at = NOW()
     WHERE id = $1
     RETURNING {_AIRFIELD_COLS}

@@ -64,6 +64,8 @@ async def create_airfield(
             body.takeoff_speed_kmh, body.takeoff_alt_offset_m,
             body.tow_plane_flarm_ids, body.winch_vs_threshold_ms,
             json.dumps(body.home_polygon) if body.home_polygon else None,
+            body.landed_visible_minutes,
+            body.monitor_strip_fields,
         )
     except Exception as e:
         if "unique" in str(e).lower():
@@ -102,6 +104,8 @@ async def update_airfield(
             body.tow_plane_flarm_ids, body.winch_vs_threshold_ms,
             body.is_active,
             json.dumps(body.home_polygon) if body.home_polygon else None,
+            body.landed_visible_minutes,
+            body.monitor_strip_fields,
         )
     except Exception as e:
         if "unique" in str(e).lower():

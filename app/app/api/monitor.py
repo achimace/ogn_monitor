@@ -95,13 +95,16 @@ async def get_today(slug: str):
 
     # 1. Resolve airfield
     row = await db.fetchrow(
-        "SELECT id, slug, latitude, longitude, elevation_m "
+        "SELECT id, slug, latitude, longitude, elevation_m, "
+        "landed_visible_minutes, monitor_strip_fields "
         "FROM airfields WHERE slug = $1 AND is_active = TRUE",
         slug,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Airfield not found")
     airfield_id = row["id"]
+    strip_fields = list(row["monitor_strip_fields"] or [])
+    landed_visible_minutes = int(row["landed_visible_minutes"] or 1440)
 
     # 2. Active flights from Redis (full hot-state picture)
     flights_by_fid: dict[str, dict] = {}
@@ -193,6 +196,10 @@ async def get_today(slug: str):
             "by_launch": by_launch,
             "longest": longest,
             "highest": highest,
+        },
+        "config": {
+            "strip_fields": strip_fields,
+            "landed_visible_minutes": landed_visible_minutes,
         },
     }
 

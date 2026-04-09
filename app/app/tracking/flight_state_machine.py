@@ -71,6 +71,24 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _seconds_since_iso(iso: str) -> float | None:
+    """Wallclock seconds elapsed since the given ISO timestamp.
+
+    Returns None if the input is empty or unparseable.
+    """
+    if not iso:
+        return None
+    try:
+        # Accept both 'Z' suffix and explicit offset
+        s = iso.replace("Z", "+00:00")
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return None
+
+
 class FlightStateMachine:
     """Processes beacons and manages flight state transitions."""
 
@@ -364,21 +382,31 @@ class FlightStateMachine:
                 continue
 
             for flarm_id, flight in list(af_flights.items()):
-                # Sticky landed: keep the entry visible until either a restart
-                # happens (handled in process_beacon) or the safety cleanup
-                # window passes. Use elapsed_s as time-since-last-beacon.
+                # Sticky landed: keep the entry visible for the configured
+                # time AFTER LANDING — completely independent of incoming
+                # beacons. Even if the FLARM is switched off the second the
+                # plane has stopped, the entry stays put. Cleanup only when
+                # the wallclock distance from landing_time exceeds the limit
+                # OR when the same aircraft starts again (handled in
+                # process_beacon).
                 if flight.status == FlightStatus.LANDING:
-                    flight.elapsed_s += 30
-                    if flight.elapsed_s > config.sticky_landed_max_age_s:
+                    age_s = _seconds_since_iso(flight.landing_time)
+                    if age_s is not None and age_s > config.sticky_landed_max_age_s:
                         self._emit_event(
                             slug, "sticky_landed_expired", flarm_id, flight,
-                            message="Sticky-landed cleanup nach 24 h",
+                            message="Anzeigedauer fuer gelandeten Flug erreicht",
                         )
                         log.info(
                             "sticky_landed_expired",
                             flarm_id=flarm_id,
                             airfield=slug,
+                            age_s=int(age_s),
                         )
+                        changed.append(flight)
+                    else:
+                        # Tag as "still pinned" so the tracker re-writes it
+                        # to Redis and refreshes the TTL even though the
+                        # FLARM is silent.
                         changed.append(flight)
                     continue
 
