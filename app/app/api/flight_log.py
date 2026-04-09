@@ -120,9 +120,15 @@ async def export_csv(
     idx = len(airfield_ids) + 1
 
     if date_filter:
-        conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
-        params.append(date_filter)
-        idx += 1
+        # asyncpg requires a real datetime.date for a ::date comparison
+        try:
+            day = date.fromisoformat(date_filter)
+        except ValueError:
+            day = None
+        if day is not None:
+            conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
+            params.append(day)
+            idx += 1
 
     where = " AND ".join(conditions)
 
