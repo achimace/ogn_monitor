@@ -50,10 +50,16 @@ async def get_flight_log(
     if date_filter:
         # Cast in UTC explicitly, otherwise the server's local timezone
         # silently shifts the day boundary and the filter misses flights
-        # that took off near midnight UTC.
-        conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
-        params.append(date_filter)
-        idx += 1
+        # that took off near midnight UTC. asyncpg requires a real
+        # datetime.date for ::date comparisons.
+        try:
+            day = date.fromisoformat(date_filter)
+        except ValueError:
+            day = None
+        if day is not None:
+            conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
+            params.append(day)
+            idx += 1
 
     where = " AND ".join(conditions)
 
@@ -147,7 +153,7 @@ async def export_csv(
     writer = csv.writer(output, delimiter=';')
 
     writer.writerow([
-        'Kennzeichen', 'WB-Kz', 'Typ', 'Start (UTC)', 'Landung (UTC)',
+        'Datum', 'Kennzeichen', 'WB-Kz', 'Typ', 'Start (UTC)', 'Landung (UTC)',
         'Dauer (h:mm)', 'Max Hoehe (m)', 'Max Distanz (km)', 'Startart',
         'Status', 'Schleppflugzeug', 'Ausklink-Hoehe (m)',
     ])
@@ -161,9 +167,11 @@ async def export_csv(
 
         takeoff = _format_time(r['takeoff_time'])
         landing = _format_time(r['landing_time'])
+        flight_date = _format_date(r['takeoff_time'])
         launch_map = {'winch': 'Winde', 'aerotow': 'F-Schlepp', 'self': 'Eigen'}
 
         writer.writerow([
+            flight_date,
             r['registration'] or '',
             r['competition_sign'] or '',
             r['aircraft_model'] or '',
@@ -230,4 +238,13 @@ def _format_time(dt) -> str:
         return ''
     if isinstance(dt, datetime):
         return dt.strftime('%H:%M')
+    return str(dt)
+
+
+def _format_date(dt) -> str:
+    if dt is None:
+        return ''
+    if isinstance(dt, datetime):
+        # Use UTC so the date matches the rest of the (UTC-based) export
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%d')
     return str(dt)
