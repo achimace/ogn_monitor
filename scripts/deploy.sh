@@ -19,6 +19,10 @@
 #   DEPLOY_PATH=/opt/ogn_monitor
 #   DEPLOY_BRANCH=master
 #   HEALTH_URL=https://flight-monitor.de/health
+#   # Optional: GitHub HTTPS auth for the remote `git pull`. A fine-grained
+#   # Personal Access Token is strongly preferred over a real password.
+#   GIT_USER=achimace
+#   GIT_PASSWORD=ghp_xxxxxxxxxxxxxxxxxxxxxxxxx
 #
 # .deploy.env is gitignored (see .gitignore).
 #
@@ -49,6 +53,13 @@ source .deploy.env
 : "${DEPLOY_PATH:=/opt/ogn_monitor}"
 : "${DEPLOY_BRANCH:=master}"
 : "${HEALTH_URL:=https://${DEPLOY_HOST}/health}"
+# Optional GitHub HTTPS credentials. If both are set, the remote git pull
+# will use them via a one-shot credential helper. Recommendation: use a
+# fine-grained Personal Access Token as GIT_PASSWORD instead of a real
+# password. The values are sent to the server through the SSH stdin pipe
+# and never written to a file on disk.
+: "${GIT_USER:=}"
+: "${GIT_PASSWORD:=}"
 
 SSH_TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
@@ -117,8 +128,19 @@ REMOTE_SCRIPT=$(cat <<'EOF'
 set -euo pipefail
 cd "__DEPLOY_PATH__"
 
-echo "→ git pull"
-git pull --ff-only origin "__DEPLOY_BRANCH__"
+# Credentials are passed in via the environment (GIT_USER / GIT_PASSWORD).
+# We never echo them, never persist them, and only inject them into git
+# via a one-shot in-process credential helper.
+if [[ -n "${GIT_USER:-}" && -n "${GIT_PASSWORD:-}" ]]; then
+    echo "→ git pull (HTTPS, user ${GIT_USER})"
+    GIT_TERMINAL_PROMPT=0 \
+    git -c "credential.helper=" \
+        -c "credential.helper=!f() { echo username=${GIT_USER}; echo password=${GIT_PASSWORD}; }; f" \
+        pull --ff-only origin "__DEPLOY_BRANCH__"
+else
+    echo "→ git pull"
+    git pull --ff-only origin "__DEPLOY_BRANCH__"
+fi
 
 if [[ "__MIGRATE__" == "1" ]]; then
     echo "→ applying SQL migrations"
@@ -146,7 +168,13 @@ REMOTE_SCRIPT="${REMOTE_SCRIPT//__DEPLOY_PATH__/$DEPLOY_PATH}"
 REMOTE_SCRIPT="${REMOTE_SCRIPT//__DEPLOY_BRANCH__/$DEPLOY_BRANCH}"
 REMOTE_SCRIPT="${REMOTE_SCRIPT//__MIGRATE__/$MIGRATE}"
 
-ssh "$SSH_TARGET" "bash -s" <<< "$REMOTE_SCRIPT"
+# Forward git credentials through SSH via -o SendEnv. We pre-pend explicit
+# `export` lines so the helper above sees them, without the values ever
+# touching the server's filesystem.
+REMOTE_PRELUDE="export GIT_USER=$(printf '%q' "$GIT_USER"); "
+REMOTE_PRELUDE+="export GIT_PASSWORD=$(printf '%q' "$GIT_PASSWORD"); "
+
+ssh "$SSH_TARGET" "bash -s" <<< "${REMOTE_PRELUDE}${REMOTE_SCRIPT}"
 ok "Remote deployment finished"
 
 # ---- 5. health check ----
