@@ -84,18 +84,18 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
     map.addControl(new maplibregl.ScaleControl(), 'bottom-left')
 
-    // Mark the map as "user controlled" the moment the user drags or
-    // zooms. We listen on the *start* events so an in-flight programmatic
-    // animation doesn't accidentally win the race.
-    const onUserGesture = () => setUserInteracted(true)
+    // Mark the map as "user controlled" the moment the user drags,
+    // zooms, rotates or pitches. We deliberately do NOT listen on the
+    // raw 'wheel' event because it also fires on harmless hover scroll
+    // and would freeze the auto-fit without any real interaction.
+    // Programmatic fitBounds is guarded via programmaticMoveRef.
+    const onUserGesture = () => {
+      if (!programmaticMoveRef.current) setUserInteracted(true)
+    }
     map.on('dragstart', onUserGesture)
-    map.on('zoomstart', () => {
-      if (!programmaticMoveRef.current) onUserGesture()
-    })
+    map.on('zoomstart', onUserGesture)
     map.on('rotatestart', onUserGesture)
     map.on('pitchstart', onUserGesture)
-    // Wheel = direct user input, fires before zoomstart on some platforms
-    map.on('wheel', onUserGesture)
 
     map.on('load', () => {
       // Add airfield marker and radius circle
@@ -179,7 +179,10 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
       updateQdrLines(map, flights, airfieldLat, airfieldLng)
     }
 
-    // Auto-fit bounds — only when the user has not taken control.
+    // Auto-fit bounds — only when the user has not taken control AND
+    // only when something is actually outside the current viewport.
+    // Live beacon updates would otherwise trigger a small fitBounds
+    // animation every few seconds and make the map jitter.
     if (!userInteracted && flights.length > 0) {
       const bounds = new maplibregl.LngLatBounds()
       if (airfieldLat && airfieldLng) {
@@ -191,16 +194,21 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
         }
       }
       if (!bounds.isEmpty()) {
-        // Mark this as a programmatic move so the gesture listeners
-        // don't think the user did it.
-        programmaticMoveRef.current = true
-        map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
-        // Clear the flag after the animation finishes
-        const clear = () => {
-          programmaticMoveRef.current = false
-          map.off('moveend', clear)
+        const view = map.getBounds()
+        const allInside =
+          view.contains(bounds.getNorthEast()) &&
+          view.contains(bounds.getSouthWest())
+        if (!allInside) {
+          // Mark this as a programmatic move so the gesture listeners
+          // don't think the user did it.
+          programmaticMoveRef.current = true
+          map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
+          const clear = () => {
+            programmaticMoveRef.current = false
+            map.off('moveend', clear)
+          }
+          map.on('moveend', clear)
         }
-        map.on('moveend', clear)
       }
     }
   }, [flights, mapReady, airfieldLat, airfieldLng, userInteracted])
@@ -222,7 +230,7 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
           title="Karte automatisch auf alle Flugzeuge zentrieren"
         >
           <span aria-hidden>⌖</span>
-          Zurueck zur Übersicht
+          Zurück zur Übersicht
         </button>
       )}
     </div>
