@@ -114,14 +114,11 @@ else
     warn "Skipping git push (--no-push)"
 fi
 
-# ---- 3. ship migrations ----
-log "Copying SQL migrations to server"
-rsync -az --delete \
-    db/migrations/ \
-    "${SSH_TARGET}:${DEPLOY_PATH}/db/migrations/"
-ok "Migrations synced"
-
-# ---- 4. remote update ----
+# ---- 3. remote update ----
+# Note: migrations live in the repo and are pulled along with the code,
+# so there is no separate rsync step. Doing rsync before `git pull` would
+# leave untracked files on disk that git refuses to overwrite. The remote
+# script below pulls first, then runs every db/migrations/*.sql file.
 log "Running remote deployment on $SSH_TARGET"
 
 REMOTE_SCRIPT=$(cat <<'EOF'
