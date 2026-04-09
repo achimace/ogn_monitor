@@ -34,7 +34,10 @@ export default function FlightTable({ flights, onSelect, stripFields }: FlightTa
   const alarm = sorted.filter((f) => f.status === 'alarm')
   const signalLost = sorted.filter((f) => f.status === 'signal_lost')
   const towing = sorted.filter((f) => f.status === 'towing')
-  const flying = sorted.filter((f) => f.status === 'flying')
+  // "FLIEGEND" includes the brief TAKEOFF phase right after lift-off so
+  // the strip appears the moment the aircraft is airborne — same moment
+  // it turns blue on the map.
+  const flying = sorted.filter((f) => f.status === 'flying' || f.status === 'takeoff')
   const outlanding = sorted.filter((f) => ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status))
   const landed = sorted.filter((f) => ['landing', 'ground'].includes(f.status))
 

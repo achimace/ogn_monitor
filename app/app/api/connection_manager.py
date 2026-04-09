@@ -133,10 +133,22 @@ class MonitorConnectionManager:
                 "flight": _to_camel_case(flight_data),
             }
         elif event_type == "landing":
+            # Sticky landed: the flight stays in the hot state and only
+            # transitions to status LANDING. Push a regular update so the
+            # client moves it to the "Gelandet" section without removing
+            # it. Removal happens later via sticky_landed_expired,
+            # flight_restarted or an explicit dismiss.
+            ws_msg = {
+                "type": "flight_update",
+                "flarmId": flarm_id,
+                "ts": _utcnow_iso(),
+                "d": _to_camel_case(flight_data),
+            }
+        elif event_type in ("sticky_landed_expired", "flight_restarted"):
             ws_msg = {
                 "type": "flight_removed",
                 "flarmId": flarm_id,
-                "reason": "landing_home",
+                "reason": event_type,
                 "summary": _build_summary(flight_data),
             }
         elif event_type == "dismissed":
@@ -176,8 +188,16 @@ class MonitorConnectionManager:
                 if ws_id in self._client_state:
                     self._client_state[ws_id][flarm_id] = dict(flight_data)
 
-        # Remove flight from client state on flight_removed
-        if event_type in ("landing", "dismissed"):
+        # Keep client state in sync after a sticky landing so subsequent
+        # delta diffs are computed against the LANDING snapshot.
+        if event_type == "landing" and flight_data:
+            for ws in conns:
+                ws_id = id(ws)
+                if ws_id in self._client_state:
+                    self._client_state[ws_id][flarm_id] = dict(flight_data)
+
+        # Remove flight from client state on real removal events
+        if event_type in ("dismissed", "sticky_landed_expired", "flight_restarted"):
             for ws in conns:
                 ws_id = id(ws)
                 if ws_id in self._client_state:

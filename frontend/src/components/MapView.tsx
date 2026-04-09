@@ -41,6 +41,12 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
   const mapRef = useRef<maplibregl.Map | null>(null)
   const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
   const [mapReady, setMapReady] = useState(false)
+  // Tracks whether the user has manually panned/zoomed the map. While true,
+  // auto-fit is paused and a "Zurueck zur Übersicht" button is shown.
+  const [userInteracted, setUserInteracted] = useState(false)
+  // Distinguishes our own programmatic fitBounds from real user moves so
+  // moveend handlers don't accidentally flip userInteracted on.
+  const programmaticMoveRef = useRef(false)
 
   // Initialize map
   useEffect(() => {
@@ -77,6 +83,19 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
     map.addControl(new maplibregl.ScaleControl(), 'bottom-left')
+
+    // Mark the map as "user controlled" the moment the user drags or
+    // zooms. We listen on the *start* events so an in-flight programmatic
+    // animation doesn't accidentally win the race.
+    const onUserGesture = () => setUserInteracted(true)
+    map.on('dragstart', onUserGesture)
+    map.on('zoomstart', () => {
+      if (!programmaticMoveRef.current) onUserGesture()
+    })
+    map.on('rotatestart', onUserGesture)
+    map.on('pitchstart', onUserGesture)
+    // Wheel = direct user input, fires before zoomstart on some platforms
+    map.on('wheel', onUserGesture)
 
     map.on('load', () => {
       // Add airfield marker and radius circle
@@ -160,8 +179,8 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
       updateQdrLines(map, flights, airfieldLat, airfieldLng)
     }
 
-    // Auto-fit bounds
-    if (flights.length > 0) {
+    // Auto-fit bounds — only when the user has not taken control.
+    if (!userInteracted && flights.length > 0) {
       const bounds = new maplibregl.LngLatBounds()
       if (airfieldLat && airfieldLng) {
         bounds.extend([airfieldLng, airfieldLat])
@@ -172,13 +191,41 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
         }
       }
       if (!bounds.isEmpty()) {
+        // Mark this as a programmatic move so the gesture listeners
+        // don't think the user did it.
+        programmaticMoveRef.current = true
         map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
+        // Clear the flag after the animation finishes
+        const clear = () => {
+          programmaticMoveRef.current = false
+          map.off('moveend', clear)
+        }
+        map.on('moveend', clear)
       }
     }
-  }, [flights, mapReady, airfieldLat, airfieldLng])
+  }, [flights, mapReady, airfieldLat, airfieldLng, userInteracted])
+
+  function resetView() {
+    setUserInteracted(false)
+  }
 
   return (
-    <div ref={mapContainer} className="w-full h-full min-h-[400px] rounded-lg overflow-hidden" />
+    <div className="relative w-full h-full min-h-[400px]">
+      <div ref={mapContainer} className="absolute inset-0 rounded-lg overflow-hidden" />
+      {userInteracted && (
+        <button
+          onClick={resetView}
+          className="absolute top-3 left-3 z-10 bg-tower-surface/95 hover:bg-tower-qdr
+            border border-tower-qdr/60 text-tower-qdr hover:text-white
+            text-sm font-semibold rounded-lg px-3 py-2 shadow-lg backdrop-blur
+            transition-colors flex items-center gap-2"
+          title="Karte automatisch auf alle Flugzeuge zentrieren"
+        >
+          <span aria-hidden>⌖</span>
+          Zurueck zur Übersicht
+        </button>
+      )}
+    </div>
   )
 }
 
