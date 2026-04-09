@@ -119,7 +119,13 @@ async def get_today(slug: str):
                 f["source"] = "live"
                 flights_by_fid[data.get("flarm_id", "")] = f
 
-    # 3. Today's archived flights from PostgreSQL (UTC day)
+    # 3. Recently landed flights from PostgreSQL.
+    # Two filters:
+    #   a) the flight must have landed within the visibility window
+    #      (landed_visible_minutes ago at most), so a 120-minute setting
+    #      really means "show landings from the last 2h"
+    #   b) AND the flight must be from the current UTC day, so we never
+    #      pull yesterday's leftovers even if the minutes window is huge
     archived = await db.fetch(
         """
         SELECT flarm_id, registration, competition_sign, aircraft_model,
@@ -127,10 +133,13 @@ async def get_today(slug: str):
                max_altitude_m, max_distance_m, launch_type, landing_type
         FROM flight_log
         WHERE airfield_id = $1
-          AND takeoff_time >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
-        ORDER BY takeoff_time DESC
+          AND landing_time IS NOT NULL
+          AND landing_time >= NOW() - ($2 || ' minutes')::interval
+          AND landing_time >= (NOW() AT TIME ZONE 'UTC')::date
+        ORDER BY landing_time DESC
         """,
         airfield_id,
+        str(landed_visible_minutes),
     )
     for r in archived:
         fid = r["flarm_id"]

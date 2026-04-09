@@ -48,7 +48,10 @@ async def get_flight_log(
     idx = len(airfield_ids) + 1
 
     if date_filter:
-        conditions.append(f"fl.takeoff_time::date = ${idx}")
+        # Cast in UTC explicitly, otherwise the server's local timezone
+        # silently shifts the day boundary and the filter misses flights
+        # that took off near midnight UTC.
+        conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
         params.append(date_filter)
         idx += 1
 
@@ -117,7 +120,7 @@ async def export_csv(
     idx = len(airfield_ids) + 1
 
     if date_filter:
-        conditions.append(f"fl.takeoff_time::date = ${idx}")
+        conditions.append(f"(fl.takeoff_time AT TIME ZONE 'UTC')::date = ${idx}")
         params.append(date_filter)
         idx += 1
 
