@@ -78,6 +78,9 @@ class MockVfStore:
         self.flights: dict[int, dict[str, str]] = {}
         self.requests: list[tuple[str, str, dict[str, str]]] = []
         self.edits: list[tuple[int, dict[str, str]]] = []
+        # parallel timestamps for the UI (same indices as requests / edits)
+        self.request_times: list[datetime] = []
+        self.edit_times: list[datetime] = []
         self.signins = 0
         self.modified: dict[int, datetime] = {}
         self._next_flid = 1001
@@ -145,6 +148,8 @@ class MockVfStore:
         """Clear request / edit logs (keeps flights and tokens)."""
         self.requests.clear()
         self.edits.clear()
+        self.request_times.clear()
+        self.edit_times.clear()
 
     # ------------------------------------------------------------- internal
 
@@ -168,6 +173,7 @@ class MockVfStore:
     def _record(self, method: str, path: str, form: dict[str, str]) -> None:
         payload = {k: v for k, v in form.items() if k not in _SECRET_FORM_KEYS}
         self.requests.append((method, path, payload))
+        self.request_times.append(datetime.now(timezone.utc))
 
 
 # --------------------------------------------------------------------- app
@@ -308,6 +314,7 @@ def create_mock_app(store: MockVfStore) -> FastAPI:
         record.update(fields)
         store.modified[flid] = datetime.now(timezone.utc)
         store.edits.append((flid, fields))
+        store.edit_times.append(store.modified[flid])
         return {"flid": str(flid), "httpstatuscode": 200}
 
     return app
@@ -339,20 +346,37 @@ def mock_client(store: MockVfStore, **kw: Any) -> VfClient:
 
 
 def _seeded_store() -> MockVfStore:
+    """Store for the standalone server: credentials from the environment
+    (VF_MOCK_USERNAME / VF_MOCK_PASSWORD or VF_MOCK_PASSWORD_MD5 /
+    VF_MOCK_APPKEY), example flights only with VF_MOCK_SEED=1."""
+    password_md5 = os.environ.get("VF_MOCK_PASSWORD_MD5") or None
+    if not password_md5 and os.environ.get("VF_MOCK_PASSWORD"):
+        password_md5 = _md5(os.environ["VF_MOCK_PASSWORD"])
     store = MockVfStore(
         username=os.environ.get("VF_MOCK_USERNAME", "mock-user"),
-        password_md5=os.environ.get("VF_MOCK_PASSWORD_MD5") or None,
+        password_md5=password_md5,
         appkey=os.environ.get("VF_MOCK_APPKEY", "mock-appkey"),
     )
-    store.add_flight(callsign="D-1234", pilotname="Test Pilot", starttype="3")
-    store.add_flight(callsign="D-5678", pilotname="Winch Pilot", starttype="5",
-                     departuretime="2026-09-24 08:00", arrivaltime="2026-09-24 08:20")
-    store.add_flight(callsign="D-EKPO", pilotname="Tow Pilot", starttype="")
+    if os.environ.get("VF_MOCK_SEED", "").lower() in ("1", "true", "yes"):
+        store.add_flight(callsign="D-1234", pilotname="Test Pilot", starttype="3")
+        store.add_flight(callsign="D-5678", pilotname="Winch Pilot", starttype="5",
+                         departuretime="2026-09-24 08:00", arrivaltime="2026-09-24 08:20")
+        store.add_flight(callsign="D-EKPO", pilotname="Tow Pilot", starttype="")
     return store
+
+
+def create_server_app(store: MockVfStore | None = None) -> FastAPI:
+    """Mock API plus the browser UI (python -m app.vfsync.vf_client.mock)."""
+    from app.vfsync.vf_client.mock_ui import attach_ui
+
+    store = store or _seeded_store()
+    app = create_mock_app(store)
+    attach_ui(app, store)
+    return app
 
 
 if __name__ == "__main__":  # pragma: no cover - manual / compose test profile
     import uvicorn
 
     port = int(os.environ.get("VF_MOCK_PORT", DEFAULT_MOCK_PORT))
-    uvicorn.run(create_mock_app(_seeded_store()), host="0.0.0.0", port=port)  # noqa: S104
+    uvicorn.run(create_server_app(), host="0.0.0.0", port=port)  # noqa: S104

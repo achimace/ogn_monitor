@@ -63,6 +63,7 @@ services:
       VFSYNC_ALERT_NTFY_URL: ${VFSYNC_ALERT_NTFY_URL:-}
       VFSYNC_ALERT_EMAIL_TO: ${VFSYNC_ALERT_EMAIL_TO:-}
       VFSYNC_TIMEZONE: ${VFSYNC_TIMEZONE:-Europe/Berlin}
+      VFSYNC_ALLOW_INSECURE_BASE_URL: ${VFSYNC_ALLOW_INSECURE_BASE_URL:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -82,6 +83,23 @@ services:
       retries: 3
       start_period: 30s
 
+  # Vereinsflieger MOCK with a browser UI for manual testing (never in
+  # production). Point the tenant at http://vfmock:8099 and set
+  # VFSYNC_ALLOW_INSECURE_BASE_URL=true. UI: http://localhost:${VFMOCK_PORT:-8099}/
+  vfmock:
+    build: ./app
+    command: python -m app.vfsync.vf_client.mock
+    profiles: ["vfmock"]
+    environment:
+      VF_MOCK_PORT: "8099"
+      VF_MOCK_USERNAME: ${VF_MOCK_USERNAME:-mock-user}
+      VF_MOCK_PASSWORD: ${VF_MOCK_PASSWORD:-mock-password}
+      VF_MOCK_APPKEY: ${VF_MOCK_APPKEY:-mock-appkey}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${VFMOCK_PORT:-8099}:8099"
+    restart: unless-stopped
+
   api:
     build: ./app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-4}
@@ -92,6 +110,7 @@ services:
       # and the operator CLI (python -m app.vfsync.tools) runs in this image
       VFSYNC_CRED_KEY: ${VFSYNC_CRED_KEY:-}
       VFSYNC_TIMEZONE: ${VFSYNC_TIMEZONE:-Europe/Berlin}
+      VFSYNC_ALLOW_INSECURE_BASE_URL: ${VFSYNC_ALLOW_INSECURE_BASE_URL:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}

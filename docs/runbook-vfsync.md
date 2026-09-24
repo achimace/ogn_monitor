@@ -51,6 +51,47 @@ werden nach dem Umschalten **nicht** nachgeschrieben (sie gelten als
 erledigt) – der Stichtag der Scharfschaltung ist damit auch der erste Tag
 mit echten Einträgen.
 
+## 2a. Lokal testen mit dem Vereinsflieger-Mock (kein echter VF-Zugriff)
+
+Der Mock (`app/app/vfsync/vf_client/mock.py`) bildet die genutzten
+VF-Endpunkte nach und hat eine Web-Oberfläche, in der du Flüge wie ein
+Pilot anlegst und live siehst, was VF-Sync schreibt (Request-Log mit
+Payloads, `flight/edit`-Log, Feldwerte je Flug).
+
+1. In `.env`: `COMPOSE_PROFILES=vfsync,vfmock`, `VFSYNC_ALLOW_INSECURE_BASE_URL=true`
+   (nur lokal! erlaubt `http://vfmock:8099` als `vf_base_url`).
+2. Starten: `docker compose up -d --build` → UI unter `http://localhost:8099/`.
+3. Mandant auf den Mock zeigen lassen (Passwort/AppKey = `VF_MOCK_PASSWORD`,
+   `VF_MOCK_APPKEY` aus `.env`, Default `mock-password` / `mock-appkey`):
+   ```
+   VF_PASSWORD=mock-password VF_APPKEY=mock-appkey docker compose run --rm --no-deps \
+     -e VF_PASSWORD -e VF_APPKEY api python -m app.vfsync.tools set-credentials \
+     --slug ohlstadt --username mock-user --base-url http://vfmock:8099
+   docker compose run --rm --no-deps api python -m app.vfsync.tools enable --slug ohlstadt --live
+   ```
+   (`--live`, sonst schreibt der Worker nur `dryrun_edit`-Audit-Einträge – auch
+   das ist im UI unter `/dashboard/vfsync` sichtbar.)
+4. Im Mock-UI einen Flug anlegen (Kennzeichen wie im Monitor, z. B. `D-1234`,
+   Startart leer oder passend).
+5. Flug auslösen – entweder echter Flugbetrieb oder ein simulierter Flug, der
+   dieselben Events wie der APRS-Worker veröffentlicht:
+   ```
+   docker compose run --rm --no-deps api python -m app.vfsync.simulate \
+     --slug ohlstadt --registration D-1234 --type aerotow --release-agl 450 \
+     --tow-minutes 7 --duration-min 45 --touch-go 1 --delay 3
+   ```
+   Im Mock-UI erscheinen nacheinander `departuretime` (sofort nach `takeoff`)
+   und mit `landing_final` das Bündel `arrivaltime`, `towheight`, `towtime`,
+   `landingcount`. Mit `--only-takeoff` bleibt der Flug in der Luft (Retry-
+   Verhalten testen), mit `--type winch` gibt es keine Höhe.
+6. Szenarien: zwei leere Flüge desselben Kennzeichens → `awaiting_match`
+   mit `ambiguous_match`; Startart `W` im Mock bei simuliertem `--type aerotow`
+   → `starttype_conflict`; Felder vorab im Mock füllen → werden nie
+   überschrieben.
+
+Der Mock ist **nicht** für den Server gedacht: Profil `vfmock` und
+`VFSYNC_ALLOW_INSECURE_BASE_URL` dort nie setzen.
+
 ## 3. Betrieb
 
 - **Budget:** 450 Requests/Tag je Mandant (VF-Limit 500). Stufen: ≥ 60 % keine
