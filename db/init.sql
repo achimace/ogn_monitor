@@ -180,6 +180,7 @@ CREATE TABLE flight_status (
     landing_count           INT NOT NULL DEFAULT 1,
     landing_method          VARCHAR(16),  -- observed/silence
     landing_confidence      REAL,
+    landing_final           BOOLEAN NOT NULL DEFAULT FALSE,  -- past the T&G window
 
     -- Signal loss analysis
     signal_loss_scenario    VARCHAR(16),  -- DIVERTED/OUTLANDED/EMERGENCY/SIGNAL_LOST

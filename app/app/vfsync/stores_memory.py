@@ -109,10 +109,13 @@ class InMemorySessionStore:
         result.sort(key=_takeoff_sort_key)
         return result
 
-    async def expire_older_than(self, days: int, now: datetime) -> int:
+    async def expire_older_than(self, days: int, now: datetime,
+                                airfield_id: UUID | None = None) -> int:
         cutoff = now - timedelta(days=days)
         count = 0
         for s in self._by_id.values():
+            if airfield_id is not None and s.airfield_id != airfield_id:
+                continue
             anchor = s.takeoff_ts or s.created_at
             if s.state in OPEN_STATES and anchor < cutoff:
                 s.state = SessionState.EXPIRED
@@ -120,12 +123,14 @@ class InMemorySessionStore:
                 count += 1
         return count
 
-    async def count_today(self, airfield_id: UUID, day: date) -> int:
+    async def count_today(self, airfield_id: UUID, day: date, tz: str = "UTC") -> int:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(tz) if tz and tz != "UTC" else timezone.utc
         return sum(
             1 for s in self._by_id.values()
             if s.airfield_id == airfield_id
             and s.takeoff_ts is not None
-            and s.takeoff_ts.astimezone(timezone.utc).date() == day
+            and s.takeoff_ts.astimezone(zone).date() == day
         )
 
 

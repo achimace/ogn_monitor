@@ -125,14 +125,106 @@ async def test_no_vf_flight_waits_and_gets_matched_on_retry(w: World):
     assert s.matched_flid == flid and s.state == SessionState.DEPARTURE_WRITTEN
 
 
-async def test_two_open_vf_flights_same_callsign_go_to_review(w: World):
-    w.vf.add_flight(callsign="D-1234")
-    w.vf.add_flight(callsign="D-1234")
+async def test_two_open_vf_flights_same_callsign_wait_with_reason(w: World):
+    """Ambiguity blocks writing but stays retryable: once the pilot fills
+    in one of the flights, the other one is unambiguous."""
+    a = w.vf.add_flight(callsign="D-1234")
+    b = w.vf.add_flight(callsign="D-1234")
     await w.event("takeoff")
     s = (await _all_sessions(w))[0]
-    assert s.state == SessionState.REVIEW
+    assert s.state == SessionState.AWAITING_MATCH
     assert any(r.startswith("ambiguous_match") for r in s.review_reasons())
     assert w.vf.edits == []
+
+    # pilot completes flight a manually (other time of day) -> b is ours
+    w.vf.flight(a)["departuretime"] = "2026-09-24 14:00"
+    w.now += timedelta(minutes=6)
+    r = await w.coord.process(s, w.tenant, "retry_airborne")
+    assert r.status == "written"
+    assert s.matched_flid == b
+
+
+async def test_completed_session_keeps_its_vf_flight(w: World):
+    """Reviewer scenario: winch flight completed on VF flight X (towheight
+    empty). Second flight of the same aircraft is an aerotow and has no
+    VF flight yet - it must NOT put its tow height on X."""
+    x = w.vf.add_flight(callsign="D-1234")
+    await w.event("takeoff")
+    w.now = T_LAND
+    await w.event("landing_final", status=FlightStatus.LANDING,
+                  landing_time=(T_OFF + timedelta(minutes=12)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  landing_method="observed", landing_confidence=1.0, launch_type="winch")
+    first = (await _all_sessions(w))[0]
+    assert first.state == SessionState.COMPLETED and first.matched_flid == x
+
+    off2 = T_OFF + timedelta(minutes=20)
+    w.now = off2 + timedelta(hours=1)
+    await w.event("landing_final", status=FlightStatus.LANDING,
+                  takeoff_time=off2.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  landing_time=(off2 + timedelta(minutes=50)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  landing_method="observed", landing_confidence=1.0,
+                  launch_type="aerotow", release_alt_agl_m=500.0, pairing_confidence=0.97,
+                  tow_duration_s=420, tow_plane_reg="D-ETOW")
+    second = [s for s in await _all_sessions(w) if s.session_id != first.session_id][0]
+    assert second.matched_flid is None
+    assert second.state == SessionState.AWAITING_MATCH
+    assert w.vf.flight(x)["towheight"] == ""
+
+
+async def test_winch_session_does_not_claim_flight_only_for_its_empty_towheight(w: World):
+    """Target fields are what the session can offer, not every writable field."""
+    x = w.vf.add_flight(callsign="D-1234", departuretime="2026-09-24 10:00",
+                        arrivaltime="2026-09-24 10:12")   # complete except tow fields
+    w.now = T_LAND
+    await w.event("landing_final", status=FlightStatus.LANDING,
+                  landing_time=T_LAND.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  landing_method="observed", landing_confidence=1.0, launch_type="winch")
+    s = (await _all_sessions(w))[0]
+    assert s.matched_flid is None
+    assert w.vf.flight(x)["arrivaltime"] == "2026-09-24 10:12"
+
+
+async def test_concurrent_processing_of_one_tenant_is_serialised(w: World):
+    """Consumer and scheduler run at once: two sessions of the same
+    registration must never both take the single open VF flight."""
+    import asyncio
+    flid = w.vf.add_flight(callsign="D-1234")
+    off2 = T_OFF + timedelta(hours=3)
+    await w.coord.sessions.upsert(
+        __import__("app.vfsync.models", fromlist=["Session"]).Session(
+            airfield_id=AF, flarm_id="DDA5BA", registration="D-1234", takeoff_ts=T_OFF))
+    await w.coord.sessions.upsert(
+        __import__("app.vfsync.models", fromlist=["Session"]).Session(
+            airfield_id=AF, flarm_id="DDA5BA", registration="D-1234", takeoff_ts=off2))
+    s1, s2 = sorted(await _all_sessions(w), key=lambda s: s.takeoff_ts)
+
+    await asyncio.gather(w.coord.process(s1, w.tenant, "takeoff"),
+                         w.coord.process(s2, w.tenant, "retry_airborne"))
+    matched = [s for s in await _all_sessions(w) if s.matched_flid == flid]
+    assert len(matched) == 1
+    assert w.vf.flight(flid)["departuretime"] == "2026-09-24 10:00"
+
+
+async def test_deleted_vf_flight_is_forgotten_and_rematched(w: World):
+    flid = w.vf.add_flight(callsign="D-1234")
+    await w.event("takeoff")
+    s = (await _all_sessions(w))[0]
+    assert s.matched_flid == flid
+    del w.vf.flights[flid]                       # pilot deleted the flight in VF
+
+    w.now = T_LAND
+    await w.event("landing_final", status=FlightStatus.LANDING,
+                  landing_time=T_LAND.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  landing_method="observed", landing_confidence=1.0, launch_type="winch")
+    s = (await _all_sessions(w))[0]
+    assert s.matched_flid is None
+    assert s.state == SessionState.AWAITING_MATCH
+    assert "vf_flight_deleted" in s.review_reasons()
+
+    new = w.vf.add_flight(callsign="D-1234")
+    w.now += timedelta(minutes=6)
+    r = await w.coord.process(s, w.tenant, "retry_hourly")
+    assert r.status == "written" and s.matched_flid == new
 
 
 async def test_a_vf_flight_is_never_matched_twice(w: World):

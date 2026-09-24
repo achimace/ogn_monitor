@@ -48,8 +48,7 @@ class VfSyncConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dry_run: bool | None = None
-    vf_base_url: str | None = Field(None, min_length=8, max_length=255,
-                                    pattern=r"^https?://[^\s/]+")
+    vf_base_url: str | None = Field(None, min_length=8, max_length=255)
     vf_cid: int | None = Field(None, ge=1)
     vf_username: str | None = Field(None, max_length=255)
     vf_password_md5: str | None = Field(
@@ -67,8 +66,10 @@ class VfSyncConfigUpdateRequest(BaseModel):
 
     @field_validator("vf_base_url")
     @classmethod
-    def strip_trailing_slash(cls, v: str | None) -> str | None:
-        return v.rstrip("/") if v is not None else None
+    def https_and_allowed_host(cls, v: str | None) -> str | None:
+        # Kap. 8.4: TLS mandatory, host allow-list (settings.vfsync_allowed_hosts)
+        from app.vfsync.urls import validate_base_url
+        return validate_base_url(v) if v is not None else None
 
     @field_validator("vf_username")
     @classmethod

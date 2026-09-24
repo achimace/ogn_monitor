@@ -117,21 +117,26 @@ async def test_process_errors_do_not_stop_the_run():
 # ---------------------------------------------------------------------------
 
 def test_health_rule():
-    now = T0
-    assert is_healthy({"status": "ok", "tenants": []}, now)
-    assert is_healthy({"status": "ok", "tenants": ["x"], "last_event_ts": (now - timedelta(minutes=10)).isoformat()}, now)
-    assert not is_healthy({"status": "ok", "tenants": ["x"], "last_event_ts": (now - timedelta(minutes=31)).isoformat()}, now)
-    assert not is_healthy({"status": "stopping", "tenants": []}, now)
-    assert is_healthy({"status": "starting", "tenants": ["x"], "started_at": now.isoformat()}, now)
+    assert is_healthy({"status": "ok", "tenants": []})
+    # no flight events for hours is fine as long as the APRS worker is connected
+    assert is_healthy({"status": "ok", "tenants": ["x"], "aprs_connected": True,
+                       "last_event_ts": None})
+    assert is_healthy({"status": "ok", "tenants": ["x"], "aprs_connected": False,
+                       "aprs_down_for_s": 600})
+    assert not is_healthy({"status": "ok", "tenants": ["x"], "aprs_connected": False,
+                           "aprs_down_for_s": 1801})
+    assert not is_healthy({"status": "stopping", "tenants": []})
+    assert is_healthy({"status": "starting", "tenants": ["x"]})
 
 
 async def test_healthz_endpoint_status_codes():
-    snap = {"status": "ok", "tenants": ["x"],
+    snap = {"status": "ok", "tenants": ["x"], "aprs_connected": True,
             "last_event_ts": datetime.now(timezone.utc) - timedelta(minutes=2)}
     app = build_health_app(lambda: snap)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://h") as c:
         r = await c.get("/healthz")
         assert r.status_code == 200 and r.json()["healthy"] is True
-        snap["last_event_ts"] = datetime.now(timezone.utc) - timedelta(hours=1)
+        snap["aprs_connected"] = False
+        snap["aprs_down_for_s"] = 3600
         r = await c.get("/healthz")
         assert r.status_code == 503 and r.json()["healthy"] is False

@@ -49,15 +49,17 @@ class FakeSessionStore:
             out.append(s)
         return out
 
-    async def expire_older_than(self, days: int, now: datetime) -> int:
+    async def expire_older_than(self, days: int, now: datetime, airfield_id=None) -> int:
         n = 0
         for s in self.sessions.values():
-            if s.is_open and s.created_at < now.replace(day=now.day) and (now - s.created_at).days >= days:
+            if airfield_id is not None and s.airfield_id != airfield_id:
+                continue
+            if s.is_open and (now - s.created_at).days >= days:
                 s.state = SessionState.EXPIRED
                 n += 1
         return n
 
-    async def count_today(self, airfield_id, day: date) -> int:
+    async def count_today(self, airfield_id, day: date, tz: str = "UTC") -> int:
         return sum(1 for s in self.sessions.values()
                    if s.airfield_id == airfield_id and s.takeoff_ts and s.takeoff_ts.date() == day)
 

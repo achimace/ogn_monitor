@@ -96,13 +96,13 @@ class StateSynchronizer:
                             tow_plane_registration, release_altitude_agl,
                             release_time, release_method, tow_duration_s,
                             pairing_confidence, landing_count, landing_method,
-                            landing_confidence,
+                            landing_confidence, landing_final,
                             updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                             $11, $12, $13, $14, $15, $16, $17, $18, $19,
                             $20, $21, $22, $23, $24, $25, $26, $27, $28,
-                            $29, $30, $31, NOW()
+                            $29, $30, $31, $32, NOW()
                         )
                         ON CONFLICT (airfield_id, flarm_id) DO UPDATE SET
                             registration = EXCLUDED.registration,
@@ -134,6 +134,7 @@ class StateSynchronizer:
                             landing_count = EXCLUDED.landing_count,
                             landing_method = EXCLUDED.landing_method,
                             landing_confidence = EXCLUDED.landing_confidence,
+                            landing_final = EXCLUDED.landing_final,
                             updated_at = NOW()
                         """,
                         flight.airfield_id,
@@ -167,6 +168,7 @@ class StateSynchronizer:
                         flight.landing_count,
                         flight.landing_method or None,
                         flight.landing_confidence or None,
+                        flight.landing_final,
                     )
                 except Exception:
                     log.exception(

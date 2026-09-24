@@ -120,8 +120,10 @@ class VfWriter:
         if flid is None:
             return WriteResult("skipped", reasons=["not_matched"])
 
-        # 1. Budget guard
-        if not await self._budget.reserve(tenant, CALLS_PER_WRITE):
+        # 1. Budget guard (get + edit, plus accesstoken + signin if needed)
+        client = await self._client(tenant)
+        needed = CALLS_PER_WRITE + (0 if getattr(client, "signed_in", False) else 2)
+        if not await self._budget.reserve(tenant, needed):
             log.warning("vfsync_budget_exhausted", slug=tenant.slug, session_id=str(sid))
             return WriteResult("deferred", reasons=["budget_exhausted"])
 
@@ -142,7 +144,6 @@ class VfWriter:
 
         # 3. Read-before-write
         try:
-            client = await self._client(tenant)
             flight = await client.get_flight(flid)
         except VfError as exc:
             return await self._fail(session, tenant, "get", exc, gate_reasons)
@@ -218,6 +219,12 @@ class VfWriter:
             session.add_review_reason(f"vf_400:{phase}")
             session.state = SessionState.REVIEW
             reasons = [*reasons, "vf_400"]
+        elif phase == "get" and exc.status == 404:
+            # The matched VF flight was deleted: forget it and match again
+            session.matched_flid = None
+            session.state = SessionState.AWAITING_MATCH
+            session.add_review_reason("vf_flight_deleted")
+            reasons = [*reasons, "flight_gone"]
         elif isinstance(exc, VfForbidden):
             reasons = [*reasons, "login_forbidden"]
         else:

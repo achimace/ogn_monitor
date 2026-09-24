@@ -88,6 +88,10 @@ services:
     environment:
       <<: *app-env
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # VF-Sync: the API encrypts tenant credentials (PUT /api/vfsync/config)
+      # and the operator CLI (python -m app.vfsync.tools) runs in this image
+      VFSYNC_CRED_KEY: ${VFSYNC_CRED_KEY:-}
+      VFSYNC_TIMEZONE: ${VFSYNC_TIMEZONE:-Europe/Berlin}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}

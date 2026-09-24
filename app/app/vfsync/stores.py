@@ -46,12 +46,15 @@ class SessionStore(Protocol):
     ) -> list[Session]:
         ...
 
-    async def expire_older_than(self, days: int, now: datetime) -> int:
-        """Open sessions older than `days` -> EXPIRED. Returns the count."""
+    async def expire_older_than(self, days: int, now: datetime,
+                                airfield_id: UUID | None = None) -> int:
+        """Open sessions older than `days` -> EXPIRED. Returns the count.
+        With airfield_id only that tenant's sessions are touched."""
         ...
 
-    async def count_today(self, airfield_id: UUID, day: date) -> int:
-        """Number of sessions (flight movements) with takeoff on `day` (UTC date)."""
+    async def count_today(self, airfield_id: UUID, day: date, tz: str = "UTC") -> int:
+        """Number of sessions (flight movements) whose takeoff falls on the
+        calendar day `day` in timezone `tz` (tenant timezone)."""
         ...
 
 

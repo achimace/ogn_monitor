@@ -47,9 +47,23 @@ class FakeRedis:
         self.created: list[FakePubSub] = []
 
     def pubsub(self):
+        if not self._pubsubs:
+            # Scripted streams exhausted: the consumer would re-subscribe
+            # forever, so simulate the worker shutdown (task cancellation).
+            import asyncio
+            raise asyncio.CancelledError()
         ps = self._pubsubs.pop(0)
         self.created.append(ps)
         return ps
+
+
+async def run_until_exhausted(consumer):
+    """Run the consumer through all scripted streams (ends with the
+    simulated cancellation; an ended stream must never stop the loop)."""
+    import asyncio
+    import pytest
+    with pytest.raises(asyncio.CancelledError):
+        await consumer.run()
 
 
 class RecordingCoordinator:
@@ -82,7 +96,7 @@ async def test_dispatches_enabled_slugs_only():
     activity = []
     consumer = EventConsumer(FakeRedis(ps), lambda: TENANTS, coord,
                              on_activity=lambda: activity.append(1), reconnect_delay_s=0)
-    await consumer.run()
+    await run_until_exhausted(consumer)
 
     assert [slug for slug, _ in coord.calls] == ["ohlstadt", "ohlstadt"]
     assert coord.calls[0][1] == ev
@@ -104,7 +118,7 @@ async def test_malformed_and_failing_messages_are_tolerated():
     ])
     coord = RecordingCoordinator(fail_on="takeoff")
     consumer = EventConsumer(FakeRedis(ps), lambda: TENANTS, coord, reconnect_delay_s=0)
-    await consumer.run()
+    await run_until_exhausted(consumer)
     assert [e["type"] for _, e in coord.calls] == ["landing_final"]
     assert consumer.events_failed == 3
     assert consumer.events_handled == 1
@@ -119,7 +133,7 @@ async def test_async_on_activity_is_awaited():
     ps = FakePubSub([pmessage("event:ohlstadt", {"type": "takeoff", "flarm_id": "A", "data": {}})])
     consumer = EventConsumer(FakeRedis(ps), lambda: TENANTS, RecordingCoordinator(),
                              on_activity=on_activity)
-    await consumer.run()
+    await run_until_exhausted(consumer)
     assert seen == [True]
 
 
@@ -136,7 +150,7 @@ async def test_tenants_provider_is_consulted_per_message():
             return snapshot
 
     consumer = EventConsumer(FakeRedis(ps), Provider(), coord)
-    await consumer.run()
+    await run_until_exhausted(consumer)
     assert len(coord.calls) == 1
 
 

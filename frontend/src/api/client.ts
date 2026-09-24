@@ -16,6 +16,26 @@ class ApiError extends Error {
   }
 }
 
+/** FastAPI returns a string for HTTPException and a list of error objects
+ *  for 422 validation errors – render both as readable text. */
+function formatDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e) => {
+        if (e && typeof e === 'object' && 'msg' in e) {
+          const loc = Array.isArray((e as { loc?: unknown[] }).loc)
+            ? (e as { loc: unknown[] }).loc.filter((p) => p !== 'body').join('.')
+            : ''
+          return loc ? `${loc}: ${(e as { msg: string }).msg}` : (e as { msg: string }).msg
+        }
+        return String(e)
+      })
+      .join('; ')
+  }
+  return detail ? String(detail) : ''
+}
+
 function getToken(): string | null {
   return localStorage.getItem('token')
 }
@@ -43,7 +63,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new ApiError(res.status, body.detail || res.statusText)
+    throw new ApiError(res.status, formatDetail(body.detail) || res.statusText)
   }
 
   if (res.status === 204) return undefined as T

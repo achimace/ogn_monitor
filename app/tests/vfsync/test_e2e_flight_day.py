@@ -195,11 +195,12 @@ async def test_flight_day_matches_golden(fixed_day):
     assert result["vf_flights"]["103"]["towheight"] == ""      # winch: no height
     assert result["requests"] < 40                               # budget-friendly
 
-    if os.environ.get("UPDATE_GOLDEN") or not GOLDEN.exists():
+    if os.environ.get("UPDATE_GOLDEN"):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
         pytest.skip("golden file written - re-run to compare")
 
+    assert GOLDEN.exists(), "golden file missing - generate deliberately with UPDATE_GOLDEN=1"
     expected = json.loads(GOLDEN.read_text())
     assert result == expected
 

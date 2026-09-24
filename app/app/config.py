@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     vfsync_list_cache_s: int = 300       # flight/list/today cache per tenant
     vfsync_health_interval_s: int = 30   # vfsync:health Redis hash refresh
     vfsync_pubsub_reconnect_s: int = 5   # delay before re-subscribing after a Redis error
+    # vf_base_url policy (Kap. 8.4): https only, hosts from this list.
+    # Insecure http:// is only for the mock in test profiles.
+    vfsync_allowed_hosts: str = "www.vereinsflieger.de"
+    vfsync_allow_insecure_base_url: bool = False
 
     model_config = {
         "env_file": ".env",

@@ -54,19 +54,37 @@ class MonitoringSnapshot:
     last_event_ts: datetime | None
     worker_started_at: datetime
     tenants: list[TenantSnapshot] = field(default_factory=list)
+    # From the APRS worker's ogn:health hash: None = hash missing/unknown
+    aprs_connected: bool | None = None
+    aprs_down_for: timedelta | None = None
+    # enabled tenants whose credentials could not be decrypted
+    config_errors: list[str] = field(default_factory=list)
 
 
 def evaluate(snap: MonitoringSnapshot) -> list[Alert]:
-    """Rules R-12; pure and deterministic."""
+    """Rules R-12; pure and deterministic.
+
+    "Feed dead" is judged by the APRS worker's own health (connection to
+    aprs.glidernet.org), not by the absence of flight events - on a rainy
+    day there simply are none.
+    """
     alerts: list[Alert] = []
 
-    reference = snap.last_event_ts or snap.worker_started_at
-    if snap.tenants and snap.now - reference > FEED_DEAD_AFTER:
-        minutes = int((snap.now - reference).total_seconds() // 60)
+    if (snap.tenants and snap.aprs_connected is False
+            and snap.aprs_down_for is not None and snap.aprs_down_for > FEED_DEAD_AFTER):
+        minutes = int(snap.aprs_down_for.total_seconds() // 60)
         alerts.append(Alert(
             key="feed_dead", level="critical",
-            title="VF-Sync: kein Flugereignis",
-            message=f"Seit {minutes} min kein Event vom APRS-Worker (Feed tot?)",
+            title="VF-Sync: OGN-Feed tot",
+            message=f"APRS-Worker seit {minutes} min nicht mit OGN verbunden",
+        ))
+
+    for slug in snap.config_errors:
+        alerts.append(Alert(
+            key=f"config_error:{slug}", level="critical",
+            title=f"VF-Sync {slug}: Credentials nicht lesbar",
+            message="VFSYNC_CRED_KEY passt nicht zu den gespeicherten Credentials - "
+                    "Mandant wird uebersprungen (Rotation, Runbook Kap. 5)",
         ))
 
     for t in snap.tenants:

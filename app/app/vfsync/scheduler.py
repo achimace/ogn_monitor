@@ -126,7 +126,8 @@ class Scheduler:
         return await self._process_all(sessions, tenant, trigger)
 
     async def expire(self, tenant: TenantConfig, now: datetime) -> int:
-        n = await self.sessions.expire_older_than(self.retention_days, now)
+        n = await self.sessions.expire_older_than(self.retention_days, now,
+                                                  airfield_id=tenant.airfield_id)
         if n:
             log.info("vfsync_sessions_expired", slug=tenant.slug, count=n)
         return n

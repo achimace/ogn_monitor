@@ -33,16 +33,23 @@ Schnittstellen: `docs/dev-guides/vfsync-internals.md`).
    ```
    docker compose run --rm --no-deps api python -m app.vfsync.tools enable --slug ohlstadt
    ```
-5. Worker starten: `docker compose --profile vfsync up -d --build vfsync`
-   (`deploy.sh` startet nur die Standarddienste; das Profil muss auf dem
-   Server einmalig mit `COMPOSE_PROFILES=vfsync` in `.env` aktiviert werden).
+5. Profil dauerhaft aktivieren: `COMPOSE_PROFILES=vfsync` in `.env` (siehe
+   `.env.example`). **Ohne diesen Eintrag** startet `deploy.sh`
+   (`docker compose up -d --build`) den Worker nicht und baut einen bereits
+   laufenden `vfsync`-Container beim nächsten Deploy nicht neu – er liefe
+   dann mit altem Code weiter. Danach: `docker compose up -d --build vfsync`.
+   `VFSYNC_CRED_KEY` wird auch dem `api`-Container gereicht (Credentials im
+   UI speichern, Operator-CLI).
 6. Prüfen: `curl -s http://localhost:8090/healthz` im Container-Netz bzw.
    Web-UI → Status „Dry-Run“, Sessions erscheinen bei Flugbetrieb, Audit zeigt
    `dryrun_edit` mit dem Payload, der geschrieben worden wäre.
 
 Scharfschalten erst nach der Validierungsphase (Konzept Kap. 12):
 `python -m app.vfsync.tools enable --slug ohlstadt --live` bzw. `dry_run`
-im UI abschalten.
+im UI abschalten. Sessions, die im Dry-Run als `completed` gebucht wurden,
+werden nach dem Umschalten **nicht** nachgeschrieben (sie gelten als
+erledigt) – der Stichtag der Scharfschaltung ist damit auch der erste Tag
+mit echten Einträgen.
 
 ## 3. Betrieb
 
@@ -62,7 +69,8 @@ im UI abschalten.
 
 | Alarm | Ursache | Maßnahme |
 |---|---|---|
-| `feed_dead` | > 30 min kein Event | APRS-Worker/Redis prüfen (`docker compose logs worker`) |
+| `feed_dead` | APRS-Worker > 30 min ohne OGN-Verbindung (`ogn:health`) | APRS-Worker/Netz prüfen (`docker compose logs worker`) |
+| `config_error:*` | Credentials nicht entschlüsselbar | `VFSYNC_CRED_KEY` prüfen, ggf. Rotation (Kap. 5) |
 | `budget:*` / `budget_stop:*` | > 80 % / 100 % Budget | Abwarten (Folgetag), ggf. `daily_budget` prüfen; Ursache für hohe Call-Zahl im Audit |
 | `pending:*` | Session > 24 h offen | Flug in VF anlegen (kein Match) oder Session im UI ansehen |
 | `write_errors:*` | ≥ 3 Fehler in Folge | Audit `error` lesen; VF erreichbar? Credentials? |

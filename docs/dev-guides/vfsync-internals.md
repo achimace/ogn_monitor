@@ -238,6 +238,18 @@ Strings; Zeiten ISO `…Z`; `landing_count`, `release_alt_agl_m`,
 **SPEC-DEVIATION (Kap. 3.2/AP-3):** das Lande-Bündel wird auf `landing_final`
 geschrieben, nicht auf `landing` – nach `landing` kann noch ein Touch & Go folgen.
 
+**SPEC-DEVIATION (Kap. 4.2):** `ambiguous_match` / `starttype_conflict` beim
+Matching setzen `AWAITING_MATCH` + Review-Grund statt `REVIEW`: es wurde
+nichts geschrieben, ein Retry darf die Lage neu bewerten (Pilot füllt den
+zweiten Flug aus). `REVIEW` ist terminal und bleibt Konflikten vorbehalten,
+die der Writer nach dem `flight/get` feststellt.
+
+**Write-Precision-Regeln im Coordinator:** Match + Write eines Mandanten
+laufen unter einem `asyncio.Lock` (Consumer und Scheduler parallel); ein
+VF-Flug, der von *irgendeiner* Session (auch `completed`) gehalten wird, ist
+für andere Sessions tabu; Zielfelder beim Matching sind nur die, die die
+Session tatsächlich anbieten kann (`session_fields`).
+
 ## Health / Alerts
 
 `vfsync:health` (Redis-Hash): `status`, `last_event_ts`, `open_sessions`,

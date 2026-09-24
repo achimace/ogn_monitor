@@ -113,8 +113,9 @@ class EventConsumer:
                     if message.get("type") != "pmessage":
                         continue
                     await self.handle_message(message["channel"], message["data"])
-                log.info("vfsync_consumer_stream_ended")
-                return
+                # A regularly ended stream (Redis closed the connection) is
+                # treated like an error: never leave the worker without events.
+                log.warning("vfsync_consumer_stream_ended", retry_in_s=self._reconnect_delay_s)
             except asyncio.CancelledError:
                 log.info("vfsync_consumer_stopping", handled=self.events_handled)
                 raise

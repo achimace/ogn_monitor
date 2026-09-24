@@ -103,17 +103,23 @@ class PgConfigStore:
 
     def __init__(self, db: Executor) -> None:
         self._db = db
+        # Enabled tenants whose credentials could not be decrypted on the
+        # last load (surfaced in health / alerts instead of silently skipped)
+        self.decrypt_failed: list[str] = []
 
     async def load_enabled(self) -> list[TenantConfig]:
         rows = await self._db.fetch(_CONFIG_SELECT + " WHERE c.enabled = TRUE ORDER BY a.slug")
         tenants: list[TenantConfig] = []
+        failed: list[str] = []
         for row in rows:
             try:
                 tenants.append(row_to_tenant(row))
             except (InvalidToken, crypto.CredentialKeyMissing) as exc:
                 # Tenant is skipped rather than run without credentials.
+                failed.append(row["slug"])
                 log.error("vfsync_config_decrypt_failed", slug=row["slug"],
                           error=type(exc).__name__)
+        self.decrypt_failed = failed
         return tenants
 
     async def load(self, airfield_id: UUID) -> TenantConfig | None:
@@ -289,7 +295,8 @@ class PgSessionStore:
         )
         return [row_to_session(r) for r in rows]
 
-    async def expire_older_than(self, days: int, now: datetime) -> int:
+    async def expire_older_than(self, days: int, now: datetime,
+                                airfield_id: UUID | None = None) -> int:
         status = await self._db.execute(
             """
             UPDATE vf_sync_sessions
@@ -297,18 +304,19 @@ class PgSessionStore:
              WHERE state = ANY($3::text[])
                AND COALESCE(takeoff_ts, created_at)
                    < ($2::timestamptz - make_interval(days => $4::int))
+               AND ($5::uuid IS NULL OR airfield_id = $5::uuid)
             """,
-            SessionState.EXPIRED.value, now, list(_OPEN_STATE_VALUES), days,
+            SessionState.EXPIRED.value, now, list(_OPEN_STATE_VALUES), days, airfield_id,
         )
         return int(status.split()[-1])
 
-    async def count_today(self, airfield_id: UUID, day: date) -> int:
+    async def count_today(self, airfield_id: UUID, day: date, tz: str = "UTC") -> int:
         return int(await self._db.fetchval(
             """
             SELECT COUNT(*) FROM vf_sync_sessions
-             WHERE airfield_id = $1 AND (takeoff_ts AT TIME ZONE 'UTC')::date = $2
+             WHERE airfield_id = $1 AND (takeoff_ts AT TIME ZONE $3)::date = $2
             """,
-            airfield_id, day,
+            airfield_id, day, tz,
         ))
 
 
@@ -406,6 +414,9 @@ _FLIGHT_ROW_COLUMNS = (
     "tow_plane_registration, release_altitude_agl, release_time, release_method, "
     "tow_duration_s, pairing_confidence"
 )
+# flight_status additionally says whether the landing is past the touch & go
+# window; flight_log rows are only written once that is the case
+_FLIGHT_ROW_EXTRA = {"flight_status": ", landing_final", "flight_log": ", TRUE AS landing_final"}
 
 
 def make_flight_row_fetcher(db: Executor) -> FlightRowFetcher:
@@ -420,7 +431,7 @@ def make_flight_row_fetcher(db: Executor) -> FlightRowFetcher:
         rows: list[dict[str, Any]] = []
         for table in ("flight_log", "flight_status"):
             fetched = await db.fetch(
-                f"SELECT {_FLIGHT_ROW_COLUMNS} FROM {table}"
+                f"SELECT {_FLIGHT_ROW_COLUMNS}{_FLIGHT_ROW_EXTRA[table]} FROM {table}"
                 " WHERE airfield_id = $1 AND flarm_id = $2 AND takeoff_time = $3",
                 airfield_id, flarm_id, takeoff_ts,
             )

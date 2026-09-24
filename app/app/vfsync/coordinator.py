@@ -18,6 +18,7 @@ that arrive without a prior takeoff (consumer restart) create the
 session from their payload so nothing is lost.
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import UUID
@@ -130,6 +131,10 @@ class SyncCoordinator:
         # per tenant: cached flight/list/today, VF clients, monitoring counters
         self._list_cache: dict[UUID, tuple[datetime, list[VfFlight]]] = {}
         self._clients: dict[UUID, tuple[tuple, VfClient]] = {}
+        # Match + write of one tenant are serialised: consumer and scheduler
+        # run concurrently and must not match the same VF flight twice.
+        self._locks: dict[UUID, asyncio.Lock] = {}
+        self._last_match: dict[UUID, str] = {}   # session_id -> last audited decision
         self.write_error_streak: dict[str, int] = {}
         self.paused: set[str] = set()          # slugs with a 403 login (until config reload)
 
@@ -260,12 +265,20 @@ class SyncCoordinator:
             log.debug("vfsync_process_noop", slug=tenant.slug,
                       session_id=str(session.session_id), trigger=trigger)
             return None
+        lock = self._locks.setdefault(tenant.airfield_id, asyncio.Lock())
+        async with lock:
+            return await self._process_locked(session, tenant, trigger)
+
+    async def _process_locked(self, session: Session, tenant: TenantConfig,
+                              trigger: str) -> Any | None:
         if session.state in FINAL_STATES:
             return None
         if tenant.slug in self.paused or not tenant.has_credentials:
             return None
 
-        movements = await self.sessions.count_today(tenant.airfield_id, self.guard.day_for(tenant))
+        movements = await self.sessions.count_today(
+            tenant.airfield_id, self.guard.day_for(tenant), tenant.timezone,
+        )
         stage = await self.guard.stage(tenant, movements)
         if stage is Stage.HARD_STOP:
             log.warning("vfsync_hard_stop", slug=tenant.slug, trigger=trigger)
@@ -283,7 +296,14 @@ class SyncCoordinator:
             fields = None            # bundle: everything still empty in VF
 
         if session.matched_flid is None:
-            matched = await self._match(session, tenant, fields or set(WRITABLE_FIELDS))
+            # Only fields the session can actually offer count as targets:
+            # a winch flight must not grab a VF flight just because its
+            # towheight is still empty.
+            from app.vfsync.writer import session_fields
+            target = (fields or set(WRITABLE_FIELDS)) & set(session_fields(session))
+            if not target:
+                return None
+            matched = await self._match(session, tenant, target)
             if not matched:
                 return None
 
@@ -291,6 +311,8 @@ class SyncCoordinator:
         self._track_result(tenant, result)
         if result.status in ("written", "dryrun") and result.sent:
             self._patch_cache(tenant, session.matched_flid, result.sent)
+        if "flight_gone" in result.reasons:
+            self.invalidate_list_cache(tenant)
         return result
 
     async def _match(self, session: Session, tenant: TenantConfig,
@@ -311,9 +333,14 @@ class SyncCoordinator:
             ))
             return False
 
+        # A VF flight belongs to exactly one session - including completed
+        # ones (a second flight of the same registration must not land on
+        # the first flight's VF entry).
+        all_sessions = await self.sessions.list_open(
+            airfield_id=tenant.airfield_id, states=set(SessionState),
+        )
         taken = {
-            s.matched_flid
-            for s in await self.sessions.list_open(airfield_id=tenant.airfield_id)
+            s.matched_flid for s in all_sessions
             if s.session_id != session.session_id and s.matched_flid is not None
         }
         candidates = [f for f in flights if f.flid not in taken]
@@ -321,21 +348,26 @@ class SyncCoordinator:
 
         for flid in decision.conflict_flids:
             session.add_review_reason(f"starttype_conflict:{flid}")
-        await self.audit.append(AuditEntry(
-            airfield_id=tenant.airfield_id, session_id=session.session_id,
-            action="match", flid=decision.flid,
-            detail=f"{decision.kind}:{decision.reason}", ts=self.clock(),
-        ))
+        detail = f"{decision.kind}:{decision.reason}"
+        if self._last_match.get(session.session_id) != detail:
+            # audit only decision changes, not every retry tick
+            self._last_match[session.session_id] = detail
+            await self.audit.append(AuditEntry(
+                airfield_id=tenant.airfield_id, session_id=session.session_id,
+                action="match", flid=decision.flid, detail=detail, ts=self.clock(),
+            ))
 
         if decision.kind == "matched":
             session.matched_flid = decision.flid
             if session.state in (SessionState.TRACKING, SessionState.AWAITING_MATCH):
                 session.state = SessionState.MATCHED
-        elif decision.kind == "awaiting_match":
+        else:
+            # awaiting_match, ambiguous, starttype_conflict: nothing was
+            # written, so keep retrying - the pilot may complete the second
+            # flight or fix the start type; the reason stays visible.
+            if decision.kind != "awaiting_match":
+                session.add_review_reason(decision.reason)
             session.state = SessionState.AWAITING_MATCH
-        else:  # ambiguous / starttype_conflict -> a human decides
-            session.add_review_reason(decision.reason)
-            session.state = SessionState.REVIEW
         await self.sessions.save(session)
         log.info("vfsync_match", slug=tenant.slug, session_id=str(session.session_id),
                  kind=decision.kind, flid=decision.flid, reason=decision.reason)
@@ -475,7 +507,10 @@ class SyncCoordinator:
         for row in rows:
             source = str(row.get("source", "?"))
             landing_ts = parse_iso(row.get("landing_time"))
-            if landing_ts is not None and session.landing_ts is None:
+            # A live flight_status row may still be inside the touch & go
+            # window - only a final landing is a landing (Kap. 6.1).
+            landing_is_final = row.get("landing_final", True) is not False
+            if landing_ts is not None and session.landing_ts is None and landing_is_final:
                 take("landing_ts", landing_ts, source)
                 take("landing_method", _text(row.get("landing_method")), source)
                 take("conf_landing", parse_float(row.get("landing_confidence")), source)

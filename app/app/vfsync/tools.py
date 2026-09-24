@@ -41,6 +41,13 @@ async def cmd_set_credentials(args) -> None:
     if not (args.username and password_md5 and appkey):
         sys.exit("username, password(-md5) and appkey are required")
 
+    if args.base_url:
+        from app.vfsync.urls import validate_base_url
+        try:
+            args.base_url = validate_base_url(args.base_url)
+        except ValueError as exc:
+            sys.exit(str(exc))
+
     airfield_id = await _airfield_id(args.slug)
     await get_db().execute(
         """

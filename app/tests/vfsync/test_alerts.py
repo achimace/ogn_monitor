@@ -27,14 +27,26 @@ def test_quiet_system_has_no_alerts():
     assert evaluate(_snap()) == []
 
 
-def test_feed_dead_after_30_minutes_uses_start_time_when_no_event_yet():
-    assert [a.key for a in evaluate(_snap(last_event_ts=NOW - timedelta(minutes=31)))] == ["feed_dead"]
-    assert evaluate(_snap(last_event_ts=None, worker_started_at=NOW - timedelta(minutes=10))) == []
-    assert [a.key for a in evaluate(_snap(last_event_ts=None))] == ["feed_dead"]
+def test_no_flight_events_is_not_a_fault():
+    """Rainy day: no events for hours, APRS worker connected -> quiet."""
+    assert evaluate(_snap(last_event_ts=None, aprs_connected=True)) == []
+    assert evaluate(_snap(last_event_ts=NOW - timedelta(hours=9), aprs_connected=True)) == []
+    assert evaluate(_snap(aprs_connected=None)) == []          # ogn:health unknown
+
+
+def test_feed_dead_when_aprs_worker_disconnected_for_30_minutes():
+    assert evaluate(_snap(aprs_connected=False, aprs_down_for=timedelta(minutes=10))) == []
+    alerts = evaluate(_snap(aprs_connected=False, aprs_down_for=timedelta(minutes=31)))
+    assert [a.key for a in alerts] == ["feed_dead"] and alerts[0].level == "critical"
 
 
 def test_feed_dead_not_raised_without_tenants():
-    assert evaluate(_snap(last_event_ts=NOW - timedelta(hours=5), tenants=[])) == []
+    assert evaluate(_snap(aprs_connected=False, aprs_down_for=timedelta(hours=5), tenants=[])) == []
+
+
+def test_config_error_alert():
+    alerts = evaluate(_snap(config_errors=["ohlstadt"]))
+    assert [a.key for a in alerts] == ["config_error:ohlstadt"]
 
 
 def test_budget_rules():

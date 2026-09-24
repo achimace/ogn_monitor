@@ -60,7 +60,14 @@ class RuntimeState:
     coordinator: SyncCoordinator | None = None
     guard: BudgetGuard | None = None
     sessions: SessionStore | None = None
+    config: ConfigStore | None = None
+    redis: Any = None
+    aprs_down_since: datetime | None = None
     last_snapshot: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def config_errors(self) -> list[str]:
+        return list(getattr(self.config, "decrypt_failed", []) or [])
 
     def enabled_tenants(self) -> list[TenantConfig]:
         return self.tenants
@@ -118,8 +125,32 @@ async def config_reload_loop(state: RuntimeState, config: ConfigStore,
 # Health / monitoring
 # ---------------------------------------------------------------------------
 
+OGN_HEALTH_KEY = "ogn:health"
+
+
+async def aprs_state(state: RuntimeState) -> tuple[bool | None, timedelta | None]:
+    """(connected, down_for) from the APRS worker's ogn:health hash."""
+    if state.redis is None:
+        return None, None
+    try:
+        h = await state.redis.hgetall(OGN_HEALTH_KEY)
+    except Exception:
+        log.exception("vfsync_ogn_health_read_failed")
+        return None, None
+    if not h:
+        return None, None
+    connected = str(h.get("connected", "")).lower() == "true"
+    now = utcnow()
+    if connected:
+        state.aprs_down_since = None
+        return True, None
+    state.aprs_down_since = state.aprs_down_since or now
+    return False, now - state.aprs_down_since
+
+
 async def build_snapshot(state: RuntimeState) -> dict[str, Any]:
     """Current health snapshot (Redis hash + /healthz body)."""
+    connected, down_for = await aprs_state(state)
     snap: dict[str, Any] = {
         "status": state.status,
         "started_at": state.started_at,
@@ -129,13 +160,18 @@ async def build_snapshot(state: RuntimeState) -> dict[str, Any]:
         "open_sessions": -1,
         "budget": {},
         "paused": sorted(state.coordinator.paused) if state.coordinator else [],
+        "config_errors": state.config_errors,
+        "aprs_connected": connected,
+        "aprs_down_for_s": int(down_for.total_seconds()) if down_for else 0,
     }
     try:
         if state.sessions is not None:
             snap["open_sessions"] = len(await state.sessions.list_open())
         if state.guard is not None and state.sessions is not None:
             for t in state.tenants:
-                movements = await state.sessions.count_today(t.airfield_id, state.guard.day_for(t))
+                movements = await state.sessions.count_today(
+                    t.airfield_id, state.guard.day_for(t), t.timezone,
+                )
                 stage = await state.guard.stage(t, movements)
                 snap["budget"][t.slug] = {
                     "used": await state.guard.used(t),
@@ -158,6 +194,8 @@ async def publish_health(redis: Any, state: RuntimeState) -> None:
         "open_sessions": str(snap["open_sessions"]),
         "tenants": ",".join(snap["tenants"]),
         "updated_at": snap["updated_at"].isoformat(),
+        "aprs_connected": "" if snap["aprs_connected"] is None else str(snap["aprs_connected"]).lower(),
+        "config_errors": ",".join(snap["config_errors"]),
     }
     for slug, b in snap["budget"].items():
         mapping[f"budget_used:{slug}"] = str(b["used"])
@@ -193,8 +231,11 @@ async def monitoring_snapshot(state: RuntimeState) -> MonitoringSnapshot:
             write_error_streak=coord.write_error_streak.get(t.slug, 0) if coord else 0,
             login_forbidden=(t.slug in coord.paused) if coord else False,
         ))
+    connected, down_for = await aprs_state(state)
     return MonitoringSnapshot(now=now, last_event_ts=state.last_event_ts,
-                              worker_started_at=state.started_at, tenants=tenants)
+                              worker_started_at=state.started_at, tenants=tenants,
+                              aprs_connected=connected, aprs_down_for=down_for,
+                              config_errors=state.config_errors)
 
 
 async def monitoring_loop(state: RuntimeState, sink: AlertSink, interval_s: float) -> None:
@@ -251,7 +292,8 @@ async def run() -> None:
         coordinator.writer = VfWriter(
             coordinator.client_for, session_store, AuditLog(audit_store), guard,
         )
-        state = RuntimeState(coordinator=coordinator, guard=guard, sessions=session_store)
+        state = RuntimeState(coordinator=coordinator, guard=guard, sessions=session_store,
+                             config=config_store, redis=redis)
         await reload_config(state, config_store, coordinator)
         log.info("vfsync_tenants_loaded", enabled=[t.slug for t in state.tenants])
 
