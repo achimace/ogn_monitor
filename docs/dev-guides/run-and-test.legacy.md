@@ -18,7 +18,7 @@ triggers:
 
 ### Alles starten
 ```bash
-cd C:/_projekte/ogn_monitor
+cd <repo-root>
 docker compose up -d
 ```
 
@@ -50,7 +50,7 @@ docker compose up -d worker api  # Neustart
 
 ### Backend
 ```bash
-cd C:/_projekte/ogn_monitor/app
+cd <repo-root>/app
 pip install -r requirements.txt
 
 # API Server (mit Hot Reload)
@@ -62,7 +62,7 @@ python -m app.worker
 
 ### Frontend
 ```bash
-cd C:/_projekte/ogn_monitor/frontend
+cd <repo-root>/frontend
 npm install
 npm run dev
 ```
@@ -71,7 +71,7 @@ npm run dev
 
 ### Python Tests
 ```bash
-cd C:/_projekte/ogn_monitor/app
+cd <repo-root>/app
 pytest -v
 
 # Einzelnen Test

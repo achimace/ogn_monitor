@@ -1,184 +1,110 @@
-# OGN FlightMonitor - Agentic Development Guide
+# OGN FlightMonitor – Claude Code Guide
 
-## Projektbeschreibung
+Echtzeit-Flugmonitoring für Segelflugplätze (OGN/FLARM → QDR, Distanz, Höhe,
+Startart, Alarme). Multi-Tenant SaaS, produktiv unter https://flight-monitor.de
+(Hetzner, Docker Compose). Pilot-Mandant: SFG Werdenfels / Ohlstadt-Pömetsried.
 
-Echtzeit-Flugmonitoring-System fuer Segelflugplaetze. Nutzt OGN/FLARM-Daten
-um alle am Heimatplatz gestarteten Flugzeuge grossflaechig (500km) zu verfolgen.
-Zeigt dem Flugleiter im Tower in Echtzeit QDR (Peilung), Distanz und Hoehe.
-Erkennt Startarten (Winde/F-Schlepp/Eigenstart), analysiert Flugprofile bei
-Signalverlust und warnt bei Notfaellen. Multi-Tenant SaaS fuer beliebige Flugplaetze.
-
-## Architektur (WICHTIG - immer beachten!)
+## Architektur (immer beachten)
 
 ```
-5 Docker-Container, 1 Sprache (Python), 1 Docker-Image fuer Worker+API:
-
-  Nginx (+ React Frontend static)
-  API Server (FastAPI, --workers 4, skalierbar)
-  APRS Worker (Python asyncio, Singleton - NUR 1 Instanz!)
-  PostgreSQL 16 + PostGIS
-  Redis 7 (Hot State + PubSub + Cache)
+Nginx (+ React-SPA static)  ─►  API (FastAPI, --workers 4)  ◄─ Redis SUBSCRIBE
+                                     │                           ▲
+                               PostgreSQL 16 + PostGIS           │ HSET + PUBLISH
+                                     ▲                           │
+OGN APRS-IS (TCP 14580) ─► APRS-Worker (python -m app.worker, SINGLETON)
 ```
 
-### Zwei-Prozess-Modell (KRITISCH)
+- **Worker und API = dasselbe Image** (`app/`), unterschiedlicher Startbefehl.
+- **APRS-Worker ist Singleton** – niemals skalieren, niemals zweite Instanz starten.
+- **Live-Daten → Redis** (Hot State). **PostgreSQL = Cold Storage** (nur bei
+  Statuswechsel / periodischem Sync schreiben).
+- Flight-Logic (CPU-bound) gehört in den Worker, nicht in die API.
+- Kein sync I/O im Event Loop. SQL nur parametrisiert.
 
-- **APRS-Worker** (`python -m app.worker`): Singleton. Verbindet sich mit OGN,
-  fuehrt Flight Logic aus, schreibt Ergebnisse in Redis (HSET + PUBLISH).
-- **API-Server** (`uvicorn app.main:app --workers 4`): Multi-Worker. Liest aus
-  Redis, bedient REST + WebSocket, synct nach PostgreSQL.
-- **Beide nutzen dasselbe Docker-Image und dieselbe Codebase.**
+## Wo steht was
 
-### 3-Schichten-Datenhaltung
-
-1. **In-Memory** (Worker): Flight-State Dicts, Ringpuffer, Aircraft-Cache
-2. **Redis** (Hot State): Live-Flugstatus, PubSub, Position-Streams
-3. **PostgreSQL** (Cold Storage): Mandanten, Config, Fluglog, Aircraft-Registry
-
-### Datenfluss
-
-```
-OGN APRS (TCP) -> Worker (Parse + Flight Logic + QDR) -> Redis (HSET + PUBLISH)
-                                                           |
-API Server <- Redis SUBSCRIBE <- - - - - - - - - - - - - -+
-    |
-WebSocket -> Browser (Delta-Updates)
-```
-
-## Masterplan
-
-Der komplette Verbesserungsplan mit allen Details steht in **`feature.md`**.
-Dort findest du:
-- Datenbank-Schema (alle Tabellen)
-- API-Endpoints (REST + WebSocket)
-- WebSocket Delta-Protokoll
-- Flight State Machine (Zustaende, Uebergaenge)
-- Flugprofil-Analyse (4 Szenarien)
-- Startart-Erkennung (Winde/F-Schlepp/Eigen)
-- F-Schlepp Paar-Tracking mit Track-Matching
-- APRS-Filter-Konsolidierung
-- OGN-Resilience (Auto-Reconnect)
-- Haftungsausschluss
-- Implementierungsreihenfolge (66 Schritte, 6 Phasen)
-
-**Lies feature.md IMMER bevor du ein neues Feature implementierst!**
-
-## Tech Stack
-
-### Backend (app/)
-- Python 3.12
-- FastAPI + Uvicorn (API-Server)
-- asyncpg (PostgreSQL async)
-- aioredis / redis-py (Redis async)
-- Pydantic v2 (Validation + Settings)
-- passlib + python-jose (Auth: bcrypt + JWT)
-- Alembic (DB Migrations)
-
-### Frontend (frontend/)
-- React 19
-- Vite
-- TailwindCSS
-- TypeScript
-- Zustand (State Management)
-- MapLibre GL (Kartenansicht)
-
-### Infrastruktur
-- Docker Compose
-- PostgreSQL 16 + PostGIS
-- Redis 7 (volatile-lru, 512MB)
-- Nginx (Reverse Proxy + Static Files)
-
-## Coding Standards
-
-### Python
-- Type Hints ueberall (PEP 484)
-- Pydantic Models fuer alle API Request/Response
-- Async/await konsequent (kein sync I/O im Event Loop!)
-- SQL: Parametrisierte Queries, NIEMALS String-Konkatenation
-- Logging: structlog mit JSON-Output
-- Docstrings: Google-Style
-- Tests: pytest + pytest-asyncio
-
-### TypeScript/React
-- Functional Components mit Hooks
-- TypeScript strict mode
-- Zustand fuer globalen State
-- Custom Hooks fuer Logik (useWebSocket, useMonitorData, useAuth)
-- TailwindCSS fuer Styling (kein CSS-in-JS)
-
-### Allgemein
-- Keine hardcoded Werte - alles ueber config.py / .env
-- Keine Secrets im Code
-- Jede Datei hat einen klaren Zweck (Single Responsibility)
-- Feature.md ist die Wahrheit - bei Widerspruechen gilt feature.md
-
-## Verzeichnisstruktur
-
-```
-ogn_monitor/
-  docker-compose.yml
-  .env.example
-  feature.md                    # Masterplan (IMMER zuerst lesen!)
-
-  app/                          # Python (Worker + API, gleiches Image)
-    Dockerfile
-    requirements.txt
-    app/
-      __init__.py
-      main.py                   # FastAPI App (API Entry)
-      worker.py                 # APRS Worker Entry
-      config.py                 # Pydantic Settings
-      redis_client.py
-      dependencies.py
-      aprs/                     # OGN-Anbindung (Worker)
-      tracking/                 # Flight Logic (Worker)
-      data/                     # Daten-Layer (Worker + API)
-      api/                      # REST + WebSocket (API)
-      db/                       # DB Connection + Migrations
-
-  frontend/                     # React SPA
-    src/
-      pages/
-      components/
-      hooks/
-      store/
-      api/
-      types/
-
-  db/                           # DB Init Scripts
-    init.sql
-    seed-airports.sql
-
-  nginx/                        # Reverse Proxy
-    Dockerfile
-    nginx.conf
-```
-
-## Wichtige Domain-Konzepte
-
-| Begriff | Bedeutung |
+| Thema | Quelle |
 |---|---|
-| FLARM | Kollisionswarngeraet in Flugzeugen, sendet Position |
-| OGN | Open Glider Network - empfaengt FLARM-Daten |
-| APRS-IS | Protokoll fuer OGN-Datenstream (TCP Port 14580) |
-| QDR | Peilung (Bearing) vom Flugplatz zum Flugzeug in Grad |
-| AGL | Above Ground Level - Hoehe ueber Grund |
-| MSL | Mean Sea Level - Hoehe ueber Meeresspiegel |
-| F-Schlepp | Flugzeugschlepp (Aerotow) - Segler wird von Motorflugzeug gezogen |
-| Windenstart | Winch Launch - Segler wird per Seilwinde gestartet |
-| Eigenstart | Self-Launch - Motorsegler startet mit eigenem Motor |
-| Aussenlandung | Outlanding - Landung ausserhalb eines Flugplatzes |
-| Flugleiter | Tower Controller - verantwortlich fuer den Flugbetrieb |
-| DDB | OGN Device Database - FLARM-ID zu Kennzeichen Zuordnung |
-| Beacon | Einzelne Positionsmeldung eines FLARM-Geraets |
-| Hot State | Live-Flugdaten in Redis (nicht in PostgreSQL!) |
+| Masterplan Monitor (Schema, WS-Protokoll, State Machine, Startart) | `feature.md` – **nur den relevanten Abschnitt lesen** (`grep -n "^## " feature.md`), nicht die ganze Datei |
+| Nächstes großes Feature: Vereinsflieger-Sync | `docs/konzept-vf-sync.md` (verbindliche Spezifikation, Arbeitspakete AP-0…AP-13) |
+| Detail-Guides je Schicht (APRS, Redis, WS, DB, Frontend …) | `docs/dev-guides/*.md` |
+| Server-Setup von Null | `DEPLOYMENT.md` |
+| Deploy / DB-Pull | `scripts/deploy.sh`, `scripts/pull-db.sh` (Konfig: `.deploy.env`) |
 
-## Haeufige Fehlerquellen (ACHTUNG)
+## Code-Landkarte
 
-1. **APRS-Worker ist Singleton** - NIEMALS mehr als 1 Instanz starten!
-2. **Redis Hot State** - Live-Daten gehoeren in Redis, NICHT in PostgreSQL
-3. **PostgreSQL nur fuer Cold Storage** - Writes nur bei Statuswechsel + periodischer Sync
-4. **APRS-Verbindung kann leise sterben** - Beacon-Timeout immer pruefen
-5. **Geo-Berechnungen sind CPU-bound** - Deshalb Worker und API getrennt
-6. **FLARM-IDs sind nicht permanent** - Koennen sich aendern, Aircraft-Cache regelmaessig reloaden
-7. **Disclaimer ist Pflicht** - Kein Monitor-Zugang ohne akzeptierten Haftungsausschluss
-8. **Track-Matching bei F-Schlepp** - Distanz + Hoehe + Kurs pruefen (parallele Starts!)
+- `app/app/aprs/` – APRS-Client, Beacon-Parser, Filter (Worker)
+- `app/app/tracking/` – State Machine, LaunchDetector, Profil-Analyse, Redis-Writer, State-Sync (Worker)
+- `app/app/api/` – REST + WebSocket (API)
+- `app/app/data/` – Aircraft-Resolver, DDB-Updater
+- `app/app/config.py` – alle Settings/Schwellwerte (keine hardcoded Werte!)
+- `frontend/src/` – React 19, Vite, Tailwind, Zustand, MapLibre
+- `db/init.sql` – vollständiges Schema für Neuinstallation
+- `db/migrations/NNN_*.sql` – **die maßgeblichen Migrationen** (siehe unten)
+
+## Datenbank-Migrationen (wichtig)
+
+- Maßgeblich sind **idempotente SQL-Dateien in `db/migrations/`**. `deploy.sh`
+  führt bei *jedem* Deploy *alle* Dateien erneut aus → jede Migration muss
+  beliebig oft fehlerfrei laufen (`IF NOT EXISTS`, `DO $$ … $$`-Guards).
+- Jede Schemaänderung zusätzlich in `db/init.sql` nachziehen.
+- Alembic unter `app/app/db/migrations/` wird im Deploy **nicht** ausgeführt
+  (Altlast). Wo `docs/konzept-vf-sync.md` „Alembic-Migration“ sagt, wird eine
+  SQL-Migration in `db/migrations/` angelegt.
+- Details: Skill `db-migration`.
+
+## Deployment (muss funktionsfähig bleiben)
+
+- Deploy **nur** über `/deploy` (Skill) bzw. `./scripts/deploy.sh` – nie
+  manuell per SSH am Server Code ändern.
+- `deploy.sh`: Clean-Tree-Check → `git push` → SSH → `git pull --ff-only` →
+  alle `db/migrations/*.sql` → `docker compose up -d --build` → Health-Check.
+- Branch `master` = Produktion.
+- **Nginx-Falle:** Auf dem Server ist `nginx/nginx.conf` lokal durch
+  `nginx.prod.conf` überschrieben. Änderungen an Nginx immer in **beiden**
+  Dateien machen und vor dem Deploy ansprechen – sonst scheitert
+  `git pull --ff-only` auf dem Server.
+- `docker-compose.override.yml` ist nur lokal (gitignored, entfernt Let's-Encrypt-Mount).
+- Nicht anfassen ohne Rückfrage: `docker-compose.yml` (Service-Namen, Volumes,
+  `replicas: 1`), `scripts/deploy.sh`, `.deploy.env*`, `.env*`, `nginx/*.conf`.
+
+## Arbeitsweise mit Agenten
+
+| Agent / Skill | Wofür |
+|---|---|
+| `backend` (Agent) | Python: Worker, Tracking, API, DB, VF-Sync |
+| `frontend` (Agent) | React-SPA, Tower-UI |
+| `reviewer` (Agent, read-only) | Review vor Commit/Deploy gegen die Projekt-Invarianten |
+| `/run-and-test` | Lokal starten, testen, debuggen |
+| `/db-migration` | Neue idempotente Migration anlegen |
+| `/vfsync-ap <AP-n>` | Ein Arbeitspaket aus dem VF-Sync-Konzept umsetzen |
+| `/deploy` | Geprüftes Produktiv-Deployment (nur manuell auslösbar) |
+
+Ablauf für Features: Plan → `backend`/`frontend` implementieren (mit Tests) →
+`reviewer` → Commit (kleine, thematische Commits, Englisch, Imperativ wie in der
+bestehenden History) → bei Bedarf `/deploy`.
+
+## Coding Standards (Kurzform)
+
+- Python 3.12, Type Hints, Pydantic v2 für alle Request/Response-Modelle,
+  structlog, Google-Docstrings, Tests mit pytest + pytest-asyncio unter `app/tests/`.
+- TypeScript strict, Functional Components + Hooks, Zustand, Tailwind (kein CSS-in-JS).
+- Keine Secrets in Code, Tests, Logs, Commits. Konfiguration über `config.py` / `.env`.
+
+## Domain-Glossar
+
+FLARM (Kollisionswarner, sendet Position) · OGN (Empfängernetz) · APRS-IS (Datenstrom) ·
+QDR (Peilung Platz→LFZ) · AGL/MSL · F-Schlepp / Winde / Eigenstart · Außenlandung ·
+Flugleiter (Tower) · DDB (FLARM-ID → Kennzeichen) · Hot State (Live-Daten in Redis) ·
+VF (Vereinsflieger.de)
+
+## Häufige Fehlerquellen
+
+1. Zweite Worker-Instanz (z. B. `docker compose up --scale worker=2`) → doppelte Events.
+2. Live-Daten in PostgreSQL statt Redis.
+3. APRS-Verbindung stirbt leise → Beacon-Timeout prüfen.
+4. FLARM-IDs sind nicht permanent → Aircraft-Cache regelmäßig neu laden.
+5. Disclaimer ist Pflicht – kein Monitor-Zugang ohne Akzeptanz.
+6. F-Schlepp-Track-Matching: Distanz + Höhe + Kurs (parallele Starts!).
+7. Datum/Zeit: DB/Redis in UTC; `date.fromisoformat` an asyncpg übergeben, keine Strings.
+8. Nicht-idempotente Migration → Deploy bricht beim nächsten Lauf ab.

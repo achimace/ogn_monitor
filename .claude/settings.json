@@ -2,18 +2,49 @@
   "permissions": {
     "allow": [
       "Bash(docker compose *)",
-      "Bash(cd C:/_projekte/ogn_monitor*)",
       "Bash(pip install*)",
       "Bash(npm *)",
       "Bash(pytest*)",
       "Bash(uvicorn*)",
       "Bash(python -m app.*)",
-      "Bash(alembic*)",
       "Bash(curl*)",
-      "Bash(git *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git switch*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git fetch*)",
+      "Bash(git stash*)",
       "Bash(mkdir*)",
       "Bash(touch*)",
-      "Bash(ls*)"
+      "Bash(ls*)",
+      "Bash(bash -n scripts/*)"
+    ],
+    "ask": [
+      "Bash(./scripts/deploy.sh*)",
+      "Bash(scripts/deploy.sh*)",
+      "Bash(./scripts/pull-db.sh*)",
+      "Bash(ssh *)",
+      "Bash(git push*)",
+      "Bash(git merge*)",
+      "Bash(git reset*)",
+      "Bash(docker compose down -v*)",
+      "Edit(scripts/**)",
+      "Edit(docker-compose.yml)",
+      "Edit(nginx/*.conf)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.deploy.env)",
+      "Read(./scripts/.deploy.env)",
+      "Read(./backups/**)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(docker compose * --scale worker*)"
     ]
   }
 }
