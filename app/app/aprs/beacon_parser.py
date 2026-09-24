@@ -166,7 +166,9 @@ def parse_beacon(line: str) -> Beacon | None:
         # FLARM ID (required for tracking)
         id_match = _FLARM_ID_RE.search(body)
         if id_match:
-            device_type = int(id_match.group(1), 16) & 0x0F
+            # idXX: bit7 stealth, bit6 no-track, bits 5..2 aircraft type,
+            # bits 1..0 address type. e.g. id06 -> type 1 (glider), FLARM.
+            device_type = (int(id_match.group(1), 16) >> 2) & 0x0F
             flarm_id = id_match.group(2).upper()
         else:
             # No FLARM ID - can't track this beacon
