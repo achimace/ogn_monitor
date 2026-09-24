@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { path: '/dashboard/airfield', label: 'Flugplatz', icon: '\u2708' },
   { path: '/dashboard/aircraft', label: 'Flugzeuge', icon: '\u2693' },
   { path: '/dashboard/log', label: 'Flugbuch', icon: '\u2261' },
+  { path: '/dashboard/vfsync', label: 'Vereinsflieger', icon: '\u21c4' },
 ]
 
 export default function Layout() {
