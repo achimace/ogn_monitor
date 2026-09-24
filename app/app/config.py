@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     vfsync_timezone: str = "Europe/Berlin"
     vfsync_config_reload_s: int = 300
     vfsync_list_cache_s: int = 300       # flight/list/today cache per tenant
+    vfsync_health_interval_s: int = 30   # vfsync:health Redis hash refresh
+    vfsync_pubsub_reconnect_s: int = 5   # delay before re-subscribing after a Redis error
 
     model_config = {
         "env_file": ".env",
