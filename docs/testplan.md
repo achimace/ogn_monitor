@@ -33,7 +33,7 @@ schreibt aber nichts).
 
 - Docker Desktop (oder Docker Engine ≥ 24) mit Compose v2
 - Repository ausgecheckt, Branch `feat/vfsync-core`
-- Ports frei: 80 (Frontend), 8000 (API), 8099 (VF-Mock), 5432, 6379
+- Ports frei: `HTTP_PORT` aus `.env` (Standard 80; Frontend **und** API laufen hinter Nginx), 8099 (VF-Mock), 5432, 6379. Im Folgenden steht `http://localhost:8080` – ersetze 8080 durch deinen `HTTP_PORT`.
 - Für Live-Tests (Kap. 6): Internetzugang zu `aprs.glidernet.org:14580`
 
 ### 1.2 `.env` anlegen
@@ -61,8 +61,8 @@ docker compose ps            # alle Dienste "running"/"healthy"
 
 | Dienst | URL |
 |---|---|
-| Frontend (Monitor, Dashboard) | http://localhost/ |
-| API | http://localhost:8000/health, http://localhost:8000/api/health/ogn |
+| Frontend (Monitor, Dashboard) | http://localhost:8080/ |
+| API (nur über Nginx erreichbar) | http://localhost:8080/health, http://localhost:8080/api/health/ogn |
 | VF-Mock (Oberfläche) | http://localhost:8099/ |
 | VF-Sync-Health | nur im Container-Netz: `docker compose exec vfsync python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8090/healthz').read())"` |
 
@@ -113,9 +113,9 @@ Wichtige Optionen: `--type winch|self|powered`, `--touch-go N`,
 | ID | Prüfung | Erwartet |
 |---|---|---|
 | S-01 | `docker compose ps` | postgres, redis, worker, api, nginx, vfsync, vfmock laufen; keine Restarts-Schleife |
-| S-02 | http://localhost:8000/health | HTTP 200, JSON mit `status` |
-| S-03 | http://localhost:8000/api/health/ogn | JSON mit `connected: true` (bei Internet) und `beacons_per_minute` > 0 nach ~1 min |
-| S-04 | http://localhost/ | Login-Seite lädt, kein Konsolenfehler |
+| S-02 | http://localhost:8080/health | HTTP 200, JSON mit `status` |
+| S-03 | http://localhost:8080/api/health/ogn | JSON mit `connected: true` (bei Internet) und `beacons_per_minute` > 0 nach ~1 min |
+| S-04 | http://localhost:8080/ | Login-Seite lädt, kein Konsolenfehler |
 | S-05 | http://localhost:8099/ | „Vereinsflieger-Mock“ lädt, Login-Daten im Kopf sichtbar |
 | S-06 | `docker compose logs vfsync --tail 20` | `vfsync_started` mit 6 Tasks; kein `vfsync_cred_key_missing` |
 | S-07 | VF-Sync-Health (Kap. 1.3) | HTTP 200, `"healthy": true` |
@@ -312,7 +312,7 @@ Mock **exakt** wie beim Simulator (`--registration`).
 
 | ID | Testfall | Schritte | Erwartet |
 |---|---|---|---|
-| X-01 | API ohne Token | `curl http://localhost:8000/api/airfields` | 401 |
+| X-01 | API ohne Token | `curl http://localhost:8080/api/airfields` | 401 |
 | X-02 | Fremde Ressourcen | Konto B: `GET /api/vfsync/sessions?airfield_id=<A>`, `/api/vfsync/audit?airfield_id=<A>`, `/api/aircraft?airfield_id=<A>` | 403 |
 | X-03 | Credentials in Logs | `docker compose logs api vfsync | grep -i -E "password|appkey|accesstoken"` nach V-03/V-30 | Nur maskierte (`***`) oder keine Treffer |
 | X-04 | Monitor öffentlich, Rest nicht | `/monitor/ohlstadt` ohne Login; `/dashboard` ohne Login | Monitor lädt; Dashboard leitet um |
