@@ -1,0 +1,279 @@
+{
+  "audit": [
+    {
+      "action": "match",
+      "detail": "matched:single_open_flight",
+      "fields": null,
+      "flid": 101,
+      "http": null
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 101,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "departuretime": "2026-09-24 08:00"
+      },
+      "flid": 101,
+      "http": 200
+    },
+    {
+      "action": "match",
+      "detail": "matched:single_open_flight",
+      "fields": null,
+      "flid": 102,
+      "http": null
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 102,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "departuretime": "2026-09-24 08:00"
+      },
+      "flid": 102,
+      "http": 200
+    },
+    {
+      "action": "match",
+      "detail": "matched:single_open_flight",
+      "fields": null,
+      "flid": 103,
+      "http": null
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 103,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "departuretime": "2026-09-24 08:20"
+      },
+      "flid": 103,
+      "http": 200
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 101,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "arrivaltime": "2026-09-24 08:15"
+      },
+      "flid": 101,
+      "http": 200
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 103,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "arrivaltime": "2026-09-24 09:30",
+        "landingcount": 2
+      },
+      "flid": 103,
+      "http": 200
+    },
+    {
+      "action": "get",
+      "detail": "",
+      "fields": null,
+      "flid": 102,
+      "http": 200
+    },
+    {
+      "action": "edit",
+      "detail": "ok",
+      "fields": {
+        "arrivaltime": "2026-09-24 10:30",
+        "towheight": 435,
+        "towtime": 3
+      },
+      "flid": 102,
+      "http": 200
+    }
+  ],
+  "events": [
+    "takeoff",
+    "launch_type_detected",
+    "takeoff",
+    "launch_type_detected",
+    "takeoff",
+    "launch_type_detected",
+    "landing",
+    "landing_final",
+    "landing",
+    "touch_and_go",
+    "landing",
+    "landing_final",
+    "landing",
+    "landing_final"
+  ],
+  "requests": 16,
+  "sessions": [
+    {
+      "flarm_id": "GLD001",
+      "flid": 102,
+      "landing": "2026-09-24T10:30:12+00:00",
+      "landing_count": 1,
+      "registration": "D-1234",
+      "release_agl": 435,
+      "review": [],
+      "start_type": "aerotow",
+      "state": "completed",
+      "takeoff": "2026-09-24T08:00:09+00:00",
+      "tow": "D-ETOW",
+      "tow_min": 3
+    },
+    {
+      "flarm_id": "TOW001",
+      "flid": 101,
+      "landing": "2026-09-24T08:15:12+00:00",
+      "landing_count": 1,
+      "registration": "D-ETOW",
+      "release_agl": null,
+      "review": [],
+      "start_type": "powered",
+      "state": "completed",
+      "takeoff": "2026-09-24T08:00:09+00:00",
+      "tow": null,
+      "tow_min": null
+    },
+    {
+      "flarm_id": "GLD002",
+      "flid": 103,
+      "landing": "2026-09-24T09:30:12+00:00",
+      "landing_count": 2,
+      "registration": "D-5678",
+      "release_agl": 430,
+      "review": [],
+      "start_type": "winch",
+      "state": "completed",
+      "takeoff": "2026-09-24T08:20:09+00:00",
+      "tow": null,
+      "tow_min": null
+    }
+  ],
+  "vf_edits": [
+    [
+      101,
+      {
+        "departuretime": "2026-09-24 08:00"
+      }
+    ],
+    [
+      102,
+      {
+        "departuretime": "2026-09-24 08:00"
+      }
+    ],
+    [
+      103,
+      {
+        "departuretime": "2026-09-24 08:20"
+      }
+    ],
+    [
+      101,
+      {
+        "arrivaltime": "2026-09-24 08:15"
+      }
+    ],
+    [
+      103,
+      {
+        "arrivaltime": "2026-09-24 09:30",
+        "landingcount": "2"
+      }
+    ],
+    [
+      102,
+      {
+        "arrivaltime": "2026-09-24 10:30",
+        "towheight": "435",
+        "towtime": "3"
+      }
+    ]
+  ],
+  "vf_flights": {
+    "101": {
+      "arrivallocation": "",
+      "arrivaltime": "2026-09-24 08:15",
+      "attendantname": "",
+      "callsign": "D-ETOW",
+      "comment": "",
+      "departurelocation": "",
+      "departuretime": "2026-09-24 08:00",
+      "flighttime": "",
+      "landingcount": "1",
+      "pilotname": "",
+      "starttype": "",
+      "towcallsign": "",
+      "towflid": "",
+      "towheight": "",
+      "towtime": ""
+    },
+    "102": {
+      "arrivallocation": "",
+      "arrivaltime": "2026-09-24 10:30",
+      "attendantname": "",
+      "callsign": "D-1234",
+      "comment": "",
+      "departurelocation": "",
+      "departuretime": "2026-09-24 08:00",
+      "flighttime": "",
+      "landingcount": "1",
+      "pilotname": "",
+      "starttype": "F",
+      "towcallsign": "",
+      "towflid": "",
+      "towheight": "435",
+      "towtime": "3"
+    },
+    "103": {
+      "arrivallocation": "",
+      "arrivaltime": "2026-09-24 09:30",
+      "attendantname": "",
+      "callsign": "D-5678",
+      "comment": "",
+      "departurelocation": "",
+      "departuretime": "2026-09-24 08:20",
+      "flighttime": "",
+      "landingcount": "2",
+      "pilotname": "",
+      "starttype": "",
+      "towcallsign": "",
+      "towflid": "",
+      "towheight": "",
+      "towtime": ""
+    }
+  }
+}

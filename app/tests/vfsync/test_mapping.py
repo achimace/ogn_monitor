@@ -126,12 +126,15 @@ def test_empty_vf_starttype_is_always_compatible(detected, vf_value):
     # detected values as plain strings
     ("aerotow", 3, True),
     ("winch", "W", True),
-    # unknown / ambiguous detections only match empty VF values
-    (StartType.UNKNOWN, 3, False),
-    (StartType.UNKNOWN, "F", False),
-    (AEROTOW_AMBIGUOUS, 3, False),
-    (AEROTOW_AMBIGUOUS, "F", False),
-    (None, 3, False),
+    # no / failed classification cannot contradict the pilot's entry
+    (StartType.UNKNOWN, 3, True),
+    (StartType.UNKNOWN, "F", True),
+    (None, 3, True),
+    # an ambiguous tow is still a tow
+    (AEROTOW_AMBIGUOUS, 3, True),
+    (AEROTOW_AMBIGUOUS, "F", True),
+    (AEROTOW_AMBIGUOUS, 5, False),
+    (AEROTOW_AMBIGUOUS, "W", False),
     ("something_else", 3, False),
 ])
 def test_starttype_compatibility_table(detected, vf_value, expected):

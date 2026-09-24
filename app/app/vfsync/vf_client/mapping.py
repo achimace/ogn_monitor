@@ -167,8 +167,11 @@ def is_starttype_compatible(detected: StartType | str | None,
     Rules (Kap. 5.4 step 5, R-04):
 
     * VF value empty (``None``, ``""``, ``0``, ``"0"``) → always compatible.
-    * Detected ``UNKNOWN`` / ``aerotow_ambiguous`` / ``None`` → only compatible
-      with an empty VF value.
+    * Detected ``None`` (not classified yet, e.g. at takeoff) or ``UNKNOWN``
+      (classification failed) → compatible: there is no evidence that could
+      contradict the pilot's entry. Heights are gated separately.
+    * Detected ``aerotow_ambiguous`` → compatible with an aerotow entry only
+      (it *was* a tow, just with an uncertain tug).
     * Numeric VF code (int or numeric string) → ``READ_MAP``.
     * Letter code (``E``/``W``/``F``, case-insensitive) → inverse ``WRITE_MAP``.
     * Unknown codes → incompatible.
@@ -184,16 +187,20 @@ def is_starttype_compatible(detected: StartType | str | None,
         return True
 
     if detected is None:
-        return False
+        return True
     if isinstance(detected, StartType):
         det = detected
     else:
-        try:
-            det = StartType(str(detected).strip().lower())
-        except ValueError:
-            return False  # e.g. "aerotow_ambiguous"
+        text = str(detected).strip().lower()
+        if text == AEROTOW_AMBIGUOUS:
+            det = StartType.AEROTOW
+        else:
+            try:
+                det = StartType(text)
+            except ValueError:
+                return False
     if det is StartType.UNKNOWN:
-        return False
+        return True
 
     raw = vf_starttype
     if isinstance(raw, str):

@@ -111,9 +111,18 @@ def test_previously_matched_flight_is_sticky():
     assert d.kind == "matched" and d.flid == 9 and d.reason == "previously_matched"
 
 
-@pytest.mark.parametrize("detected", ["unknown", "aerotow_ambiguous", None])
-def test_undetected_start_type_only_matches_empty_vf_starttype(detected):
-    d = match_session(_session(start_type_detected=detected), [_flight(1, starttype=3)], DEP)
-    assert d.kind == "starttype_conflict"
-    d = match_session(_session(start_type_detected=detected), [_flight(1)], DEP)
-    assert d.kind == "matched"
+@pytest.mark.parametrize("detected", ["unknown", None])
+def test_undetected_start_type_cannot_contradict_vf(detected):
+    """At takeoff nothing is classified yet - the pilot's entry stands."""
+    for vf in (3, 5, "E", None):
+        d = match_session(_session(start_type_detected=detected), [_flight(1, starttype=vf)], DEP)
+        assert d.kind == "matched", (detected, vf)
+
+
+def test_ambiguous_aerotow_matches_aerotow_or_empty_only():
+    assert match_session(_session(start_type_detected="aerotow_ambiguous"),
+                         [_flight(1, starttype=3)], DEP).kind == "matched"
+    assert match_session(_session(start_type_detected="aerotow_ambiguous"),
+                         [_flight(1)], DEP).kind == "matched"
+    assert match_session(_session(start_type_detected="aerotow_ambiguous"),
+                         [_flight(1, starttype=5)], DEP).kind == "starttype_conflict"
