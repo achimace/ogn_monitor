@@ -46,6 +46,42 @@ services:
     deploy:
       replicas: 1  # SINGLETON - niemals mehr als 1!
 
+  # VF-Sync worker (Vereinsflieger integration). Same image as worker/api,
+  # opt-in via profile: `docker compose --profile vfsync up -d vfsync`.
+  # Consumes Redis events only - never a second APRS worker.
+  vfsync:
+    build: ./app
+    command: python -m app.vfsync
+    profiles: ["vfsync"]
+    environment:
+      <<: *app-env
+      VFSYNC_ENABLED: ${VFSYNC_ENABLED:-true}
+      # Worker refuses to start without it (app/app/vfsync/main.py); must not
+      # be ":?" - that would break every compose call, incl. deploy.sh.
+      VFSYNC_CRED_KEY: ${VFSYNC_CRED_KEY:-}
+      VFSYNC_HEALTH_PORT: ${VFSYNC_HEALTH_PORT:-8090}
+      VFSYNC_ALERT_NTFY_URL: ${VFSYNC_ALERT_NTFY_URL:-}
+      VFSYNC_ALERT_EMAIL_TO: ${VFSYNC_ALERT_EMAIL_TO:-}
+      VFSYNC_TIMEZONE: ${VFSYNC_TIMEZONE:-Europe/Berlin}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 15s
+    deploy:
+      replicas: 1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://localhost:%s/healthz' % os.environ.get('VFSYNC_HEALTH_PORT','8090'))"]
+      interval: 30s
+      retries: 3
+      start_period: 30s
+
   api:
     build: ./app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS:-4}

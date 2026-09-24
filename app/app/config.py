@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     alarm_timeout_s: int = 600  # 10 minutes without beacon -> ALARM
     signal_loss_timeout_s: int = 300  # 5 minutes -> start concern
 
+    # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
+    vfsync_enabled: bool = False
+    vfsync_cred_key: str = ""            # Fernet key (base64) for vf_sync_config credentials
+    vfsync_health_port: int = 8090
+    vfsync_alert_ntfy_url: str = ""
+    vfsync_alert_email_to: str = ""      # uses the SMTP settings above
+    vfsync_timezone: str = "Europe/Berlin"
+    vfsync_config_reload_s: int = 300
+    vfsync_list_cache_s: int = 300       # flight/list/today cache per tenant
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
