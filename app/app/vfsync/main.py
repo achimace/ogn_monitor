@@ -1,14 +1,23 @@
-"""VF-Sync worker wiring: stores, coordinator, event consumer, health.
+"""VF-Sync worker wiring.
 
-``python -m app.vfsync`` -> ``run()``. Scheduler (AP-6), HTTP health and
-alerting (AP-11) plug in here later. Importing this module has no side
-effects; connections are opened inside ``run()``.
+``python -m app.vfsync`` -> ``run()``. Builds the PostgreSQL stores, the
+budget guard, writer and coordinator, then runs these loops until
+SIGTERM/SIGINT:
+
+- event consumer  (Redis PubSub event:* -> coordinator)
+- scheduler       (15 min / hourly / 21:00 / 03:00 runs)
+- config reload   (every VFSYNC_CONFIG_RELOAD_S; new tenants get recovery)
+- health          (Redis hash vfsync:health + HTTP /healthz)
+- monitoring      (alert rules R-12 every minute)
+
+Importing this module has no side effects; connections are opened
+inside ``run()``.
 """
 
 import asyncio
 import signal
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 import structlog
@@ -16,10 +25,15 @@ import structlog
 from app.config import settings
 from app.db.connection import close_db, init_db
 from app.redis_client import close_redis, init_redis
+from app.vfsync.alerts import AlertSink, MonitoringSnapshot, TenantSnapshot, evaluate
+from app.vfsync.audit import AuditLog
+from app.vfsync.budget import BudgetGuard
 from app.vfsync.coordinator import SyncCoordinator
 from app.vfsync.event_consumer import EventConsumer
+from app.vfsync.health import build_health_app, serve_health
 from app.vfsync.logging import configure_logging
-from app.vfsync.models import TenantConfig
+from app.vfsync.models import TenantConfig, utcnow
+from app.vfsync.scheduler import Scheduler
 from app.vfsync.stores import ConfigStore, SessionStore
 from app.vfsync.stores_pg import (
     PgAuditStore,
@@ -28,10 +42,12 @@ from app.vfsync.stores_pg import (
     PgSessionStore,
     make_flight_row_fetcher,
 )
+from app.vfsync.writer import VfWriter
 
 log = structlog.get_logger()
 
 HEALTH_KEY = "vfsync:health"
+MONITORING_INTERVAL_S = 60
 
 
 @dataclass
@@ -39,7 +55,12 @@ class RuntimeState:
     """Mutable worker state shared between the loops."""
     tenants: list[TenantConfig] = field(default_factory=list)
     status: str = "starting"
+    started_at: datetime = field(default_factory=utcnow)
     consumer: EventConsumer | None = None
+    coordinator: SyncCoordinator | None = None
+    guard: BudgetGuard | None = None
+    sessions: SessionStore | None = None
+    last_snapshot: dict[str, Any] = field(default_factory=dict)
 
     def enabled_tenants(self) -> list[TenantConfig]:
         return self.tenants
@@ -48,6 +69,10 @@ class RuntimeState:
     def last_event_ts(self) -> datetime | None:
         return self.consumer.last_event_ts if self.consumer else None
 
+
+# ---------------------------------------------------------------------------
+# Config / recovery
+# ---------------------------------------------------------------------------
 
 async def recover_tenants(coordinator: SyncCoordinator, tenants: list[TenantConfig]) -> None:
     """Run recovery for each tenant; one failing tenant does not stop the rest."""
@@ -60,11 +85,17 @@ async def recover_tenants(coordinator: SyncCoordinator, tenants: list[TenantConf
 
 async def reload_config(state: RuntimeState, config: ConfigStore,
                         coordinator: SyncCoordinator) -> None:
-    """Reload enabled tenants; newly enabled tenants get a recovery run."""
+    """Reload enabled tenants; newly enabled tenants get a recovery run,
+    reloaded credentials lift a login pause."""
     tenants = await config.load_enabled()
-    known = {t.airfield_id for t in state.tenants}
+    known = {t.airfield_id: t for t in state.tenants}
     added = [t for t in tenants if t.airfield_id not in known]
     removed = [t.slug for t in state.tenants if t.airfield_id not in {x.airfield_id for x in tenants}]
+    for t in tenants:
+        old = known.get(t.airfield_id)
+        if old and (old.vf_password_md5, old.vf_appkey, old.vf_username) != (
+                t.vf_password_md5, t.vf_appkey, t.vf_username):
+            coordinator.resume(t)
     state.tenants = tenants
     if added or removed:
         log.info("vfsync_config_changed", added=[t.slug for t in added], removed=removed,
@@ -83,31 +114,102 @@ async def config_reload_loop(state: RuntimeState, config: ConfigStore,
             log.exception("vfsync_config_reload_failed")
 
 
-async def publish_health(redis: Any, state: RuntimeState, sessions: SessionStore) -> None:
-    """Write the vfsync:health hash (read by health.py / AP-11)."""
-    try:
-        open_sessions = len(await sessions.list_open())
-    except Exception:
-        log.exception("vfsync_health_sessions_failed")
-        open_sessions = -1
-    await redis.hset(HEALTH_KEY, mapping={
+# ---------------------------------------------------------------------------
+# Health / monitoring
+# ---------------------------------------------------------------------------
+
+async def build_snapshot(state: RuntimeState) -> dict[str, Any]:
+    """Current health snapshot (Redis hash + /healthz body)."""
+    snap: dict[str, Any] = {
         "status": state.status,
-        "last_event_ts": state.last_event_ts.isoformat() if state.last_event_ts else "",
-        "open_sessions": str(open_sessions),
-        "tenants": ",".join(t.slug for t in state.tenants),
-        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-    })
+        "started_at": state.started_at,
+        "last_event_ts": state.last_event_ts,
+        "tenants": [t.slug for t in state.tenants],
+        "updated_at": utcnow(),
+        "open_sessions": -1,
+        "budget": {},
+        "paused": sorted(state.coordinator.paused) if state.coordinator else [],
+    }
+    try:
+        if state.sessions is not None:
+            snap["open_sessions"] = len(await state.sessions.list_open())
+        if state.guard is not None and state.sessions is not None:
+            for t in state.tenants:
+                movements = await state.sessions.count_today(t.airfield_id, state.guard.day_for(t))
+                stage = await state.guard.stage(t, movements)
+                snap["budget"][t.slug] = {
+                    "used": await state.guard.used(t),
+                    "daily_budget": t.daily_budget,
+                    "stage": stage.value,
+                    "movements": movements,
+                }
+    except Exception:
+        log.exception("vfsync_snapshot_failed")
+    state.last_snapshot = snap
+    return snap
 
 
-async def health_loop(redis: Any, state: RuntimeState, sessions: SessionStore,
-                      interval_s: float) -> None:
+async def publish_health(redis: Any, state: RuntimeState) -> None:
+    """Write the vfsync:health hash (read by the API status endpoint)."""
+    snap = await build_snapshot(state)
+    mapping = {
+        "status": snap["status"],
+        "last_event_ts": snap["last_event_ts"].isoformat() if snap["last_event_ts"] else "",
+        "open_sessions": str(snap["open_sessions"]),
+        "tenants": ",".join(snap["tenants"]),
+        "updated_at": snap["updated_at"].isoformat(),
+    }
+    for slug, b in snap["budget"].items():
+        mapping[f"budget_used:{slug}"] = str(b["used"])
+        mapping[f"stage:{slug}"] = b["stage"]
+    await redis.hset(HEALTH_KEY, mapping=mapping)
+
+
+async def health_loop(redis: Any, state: RuntimeState, interval_s: float) -> None:
     while True:
         try:
-            await publish_health(redis, state, sessions)
+            await publish_health(redis, state)
         except Exception:
             log.exception("vfsync_health_publish_failed")
         await asyncio.sleep(interval_s)
 
+
+async def monitoring_snapshot(state: RuntimeState) -> MonitoringSnapshot:
+    """Collect the inputs of the alert rules (R-12)."""
+    now = utcnow()
+    tenants: list[TenantSnapshot] = []
+    coord = state.coordinator
+    for t in state.tenants:
+        used = await state.guard.used(t) if state.guard else 0
+        oldest: timedelta | None = None
+        if state.sessions is not None:
+            open_sessions = await state.sessions.list_open(airfield_id=t.airfield_id)
+            pending = [s for s in open_sessions if s.landing_ts is not None]
+            if pending:
+                oldest = now - min(s.created_at for s in pending)
+        tenants.append(TenantSnapshot(
+            slug=t.slug, budget_used=used, daily_budget=t.daily_budget,
+            oldest_pending_age=oldest,
+            write_error_streak=coord.write_error_streak.get(t.slug, 0) if coord else 0,
+            login_forbidden=(t.slug in coord.paused) if coord else False,
+        ))
+    return MonitoringSnapshot(now=now, last_event_ts=state.last_event_ts,
+                              worker_started_at=state.started_at, tenants=tenants)
+
+
+async def monitoring_loop(state: RuntimeState, sink: AlertSink, interval_s: float) -> None:
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            snap = await monitoring_snapshot(state)
+            await sink.send_all(evaluate(snap))
+        except Exception:
+            log.exception("vfsync_monitoring_failed")
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 async def run() -> None:
     """Run the VF-Sync worker until SIGTERM/SIGINT."""
@@ -134,14 +236,22 @@ async def run() -> None:
     try:
         config_store = PgConfigStore(pool)
         session_store = PgSessionStore(pool)
+        audit_store = PgAuditStore(pool)
+        budget_store = PgBudgetStore(pool)
+        guard = BudgetGuard(budget_store)
         coordinator = SyncCoordinator(
             sessions=session_store,
-            audit=PgAuditStore(pool),
-            budget=PgBudgetStore(pool),
+            audit=audit_store,
+            budget=budget_store,
             config=config_store,
             fetch_flight_rows=make_flight_row_fetcher(pool),
+            guard=guard,
+            list_cache_s=settings.vfsync_list_cache_s,
         )
-        state = RuntimeState()
+        coordinator.writer = VfWriter(
+            coordinator.client_for, session_store, AuditLog(audit_store), guard,
+        )
+        state = RuntimeState(coordinator=coordinator, guard=guard, sessions=session_store)
         await reload_config(state, config_store, coordinator)
         log.info("vfsync_tenants_loaded", enabled=[t.slug for t in state.tenants])
 
@@ -151,19 +261,40 @@ async def run() -> None:
             coordinator=coordinator,
         )
         state.consumer = consumer
+        scheduler = Scheduler(
+            process=coordinator.process,
+            sessions=session_store,
+            budget=budget_store,
+            tenants_provider=state.enabled_tenants,
+        )
+        sink = AlertSink()
+        log.info("vfsync_alert_channels", channels=sink.channels)
+        health_app = build_health_app(
+            lambda: state.last_snapshot or {"status": state.status, "tenants": []}
+        )
         state.status = "ok"
         tasks = [
             asyncio.create_task(consumer.run(), name="vfsync-consumer"),
+            asyncio.create_task(scheduler.run(), name="vfsync-scheduler"),
             asyncio.create_task(
                 config_reload_loop(state, config_store, coordinator,
                                    settings.vfsync_config_reload_s),
                 name="vfsync-config-reload",
             ),
             asyncio.create_task(
-                health_loop(redis, state, session_store, settings.vfsync_health_interval_s),
+                health_loop(redis, state, settings.vfsync_health_interval_s),
                 name="vfsync-health",
             ),
+            asyncio.create_task(
+                monitoring_loop(state, sink, MONITORING_INTERVAL_S),
+                name="vfsync-monitoring",
+            ),
+            asyncio.create_task(
+                serve_health(health_app, settings.vfsync_health_port, shutdown),
+                name="vfsync-health-http",
+            ),
         ]
+        log.info("vfsync_started", tasks=[t.get_name() for t in tasks])
         await shutdown.wait()
         state.status = "stopping"
     finally:
