@@ -65,7 +65,7 @@ async def load_airfield_configs() -> dict:
         "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, "
         "signal_loss_timeout_s, takeoff_speed_kmh, takeoff_alt_offset_m, "
         "tow_plane_flarm_ids, winch_vs_threshold_ms, "
-        "landed_visible_minutes, "
+        "landed_visible_minutes, touch_go_max_ground_s, silence_landing_s, "
         "ST_AsGeoJSON(home_polygon) AS home_polygon_geojson "
         "FROM airfields WHERE is_active = TRUE"
     )
@@ -103,6 +103,8 @@ async def load_airfield_configs() -> dict:
             winch_vs_threshold_ms=row["winch_vs_threshold_ms"] or 8.0,
             home_polygon=home_polygon,
             sticky_landed_max_age_s=(row["landed_visible_minutes"] or 1440) * 60,
+            touch_go_max_ground_s=row["touch_go_max_ground_s"] or 90,
+            silence_landing_s=row["silence_landing_s"] or 180,
         )
 
     log.info("airfield_configs_loaded", count=len(configs))

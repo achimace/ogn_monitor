@@ -160,7 +160,10 @@ class MonitorConnectionManager:
             }
         elif event_type in ("alarm", "emergency", "outlanding", "diverted", "signal_lost"):
             ws_msg = self._build_alarm_message(event_type, flarm_id, flight_data, message_text)
-        elif event_type == "signal_recovered":
+        elif event_type in ("signal_recovered", "launch_type_detected",
+                            "touch_and_go", "landing_retracted", "landing_final"):
+            # The flight stays in the hot state; push its refreshed fields
+            # (launch type, release altitude, landing counter, status).
             ws_msg = {
                 "type": "flight_update",
                 "flarmId": flarm_id,

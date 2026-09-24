@@ -36,6 +36,8 @@ class AircraftInfo:
     source: str              # "tenant" / "ogn_ddb" / "flarmnet" / "aprs"
     tracked: bool
     identified: bool
+    # Launch-detection role: towplane / glider / motorglider_sl / powered / ""
+    role: str = ""
 
 
 class AircraftResolver:
@@ -125,7 +127,7 @@ class AircraftResolver:
         # 2. Tenant-specific aircraft (override global entries)
         rows = await db.fetch(
             "SELECT flarm_id, registration, aircraft_model, "
-            "competition_sign, aircraft_type "
+            "competition_sign, aircraft_type, role "
             "FROM tenant_aircraft WHERE is_active = TRUE"
         )
         for row in rows:
@@ -139,6 +141,7 @@ class AircraftResolver:
                 source="tenant",
                 tracked=True,
                 identified=True,
+                role=role_from_row(row["role"], row["aircraft_type"]),
             )
 
         self._cache = cache
@@ -188,3 +191,30 @@ def _parse_aircraft_type_str(at: str | None) -> int:
         "tmg": 8, "helicopter": 3,
     }
     return mapping.get(at.lower(), 0)
+
+
+# Launch-detection roles, see app.tracking.launch_detector
+VALID_ROLES = {"towplane", "glider", "motorglider_sl", "powered"}
+
+# Fallback: derive the role from the legacy tenant aircraft_type
+_ROLE_FROM_AIRCRAFT_TYPE = {
+    "glider": "glider",
+    "tow_plane": "towplane",
+    "motor_glider": "motorglider_sl",
+    "tmg": "motorglider_sl",
+    "helicopter": "powered",
+    "powered": "powered",
+}
+
+
+def role_from_row(role: str | None, aircraft_type: str | None) -> str:
+    """Effective launch-detection role of a tenant aircraft.
+
+    An explicit ``role`` wins; otherwise the legacy ``aircraft_type`` is
+    mapped. Unknown values yield "" (no a-priori knowledge).
+    """
+    if role and role.lower() in VALID_ROLES:
+        return role.lower()
+    if aircraft_type:
+        return _ROLE_FROM_AIRCRAFT_TYPE.get(aircraft_type.lower(), "")
+    return ""

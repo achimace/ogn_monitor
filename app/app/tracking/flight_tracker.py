@@ -66,9 +66,13 @@ class FlightTracker:
 
         # Stage 2: Try each airfield config
         for slug, config in self._configs.items():
+            tracked_here = self.state_machine.get_flight(slug, beacon.flarm_id) is not None
             flight = await self._process_beacon_for_airfield(beacon, config)
-            if flight:
-                break  # A flight belongs to at most one airfield
+            if flight or tracked_here:
+                # A flight belongs to at most one airfield - also when its
+                # beacon was dropped (out of order), never offer it to the
+                # next airfield.
+                break
 
     async def _process_beacon_for_airfield(
         self, beacon: Beacon, config: AirfieldConfig
@@ -95,6 +99,7 @@ class FlightTracker:
                 flight.registration = info.registration
                 flight.aircraft_model = info.aircraft_model
                 flight.competition_sign = info.competition_sign
+                flight.aircraft_role = info.role
             elif beacon.registration:
                 self.aircraft_resolver.update_from_aprs(
                     beacon.flarm_id, beacon.registration
@@ -109,15 +114,22 @@ class FlightTracker:
             beacon.speed, beacon.vs, beacon.track,
         )
 
-        # Launch detection
+        # Launch detection (per airfield: pairing only among flights of
+        # this field). Every beacon is offered to the detector because a
+        # resolved tow plane still feeds the towplane_max fallback of the
+        # glider it is towing.
         new_status = flight.status
-        if old_status is None and new_status == FlightStatus.TAKEOFF:
-            # New takeoff
-            all_flights = self.state_machine.get_all_active_flights()
-            self.launch_detector.on_takeoff(flight, all_flights)
-        elif self.launch_detector.is_pending(beacon.flarm_id):
-            all_flights = self.state_machine.get_all_active_flights()
-            self.launch_detector.on_beacon(flight, beacon, all_flights)
+        airfield_flights = list(self.state_machine.get_all_flights(slug).values())
+        is_new_takeoff = (
+            new_status == FlightStatus.TAKEOFF
+            and (old_status is None or old_status == FlightStatus.LANDING)
+        )
+        if is_new_takeoff:
+            if old_status == FlightStatus.LANDING:
+                # Restart: drop the detection state of the archived flight
+                self.launch_detector.cleanup(beacon.flarm_id)
+            self.launch_detector.on_takeoff(flight, airfield_flights, config)
+        self.launch_detector.on_beacon(flight, beacon, airfield_flights, config)
 
         # Write to Redis. Landed flights get an extended TTL so that the
         # entry survives even if the FLARM is switched off right after
@@ -188,10 +200,12 @@ class FlightTracker:
         await self._dispatch_events()
 
     async def _dispatch_events(self) -> None:
-        """Drain pending state-machine events, publish them, and react
-        to lifecycle events that need follow-up actions (archive, cleanup).
+        """Drain pending state-machine and launch-detector events, publish
+        them, and react to lifecycle events that need follow-up actions
+        (archive, cleanup).
         """
-        for event in self.state_machine.drain_events():
+        events = self.state_machine.drain_events() + self.launch_detector.drain_events()
+        for event in events:
             etype = event["event_type"]
             slug = event["airfield_slug"]
             fid = event["flarm_id"]
@@ -203,13 +217,34 @@ class FlightTracker:
                 message=event.get("message", ""),
             )
 
-            # Restart: archive the old flight to flight_log; the new
-            # FlightState already replaced it in the state machine.
-            if etype == "flight_restarted":
+            # Launch type may be decided on ANOTHER aircraft's beacon
+            # (tow-plane side fallback, partner settlement, stale
+            # closure): refresh that flight's hash so API/reload see it.
+            if etype == "launch_type_detected":
+                ttl = None
+                if old_flight.status == FlightStatus.LANDING:
+                    cfg = self._configs.get(slug)
+                    if cfg is not None:
+                        ttl = cfg.sticky_landed_max_age_s + 3600
+                await self.redis_writer.update_flight(
+                    slug, fid, old_flight.to_redis_dict(), ttl=ttl
+                )
+
+            # Final landing (touch & go window passed): persist to
+            # flight_log right away so downstream consumers (VF-Sync
+            # recovery, flight log page) see it the same day. The upsert
+            # is idempotent, a later archive only refreshes it.
+            elif etype == "landing_final":
                 await self._archive_to_log(old_flight)
-                # Cleanup downstream caches that referenced the old run
-                self.launch_detector.cleanup(old_flight.flarm_id)
                 self.profile_buffer.remove(old_flight.flarm_id)
+
+            # Restart: archive the old flight to flight_log; the new
+            # FlightState already replaced it in the state machine and its
+            # launch detection was (re)started in _process_beacon_for_airfield
+            # - do NOT clean up the detector here, that would drop the new
+            # flight's state (same FLARM id).
+            elif etype == "flight_restarted":
+                await self._archive_to_log(old_flight)
 
             # Sticky landed cleanup after 24h: archive AND remove from
             # the hot state.

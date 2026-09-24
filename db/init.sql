@@ -47,6 +47,8 @@ CREATE TABLE airfields (
     tow_plane_flarm_ids     TEXT[] DEFAULT '{}',
     winch_vs_threshold_ms   DOUBLE PRECISION DEFAULT 8.0,
     landed_visible_minutes  INT DEFAULT 1440,           -- 24h sticky-landed
+    touch_go_max_ground_s   INT DEFAULT 90,             -- re-takeoff within -> touch & go
+    silence_landing_s       INT DEFAULT 180,            -- final approach + silence -> landing
     monitor_strip_fields    TEXT[] DEFAULT ARRAY[
         'competition_sign','aircraft_model','takeoff_time','landing_time',
         'duration','launch_type','qdr','distance','altitude','agl',
@@ -95,6 +97,10 @@ CREATE TABLE tenant_aircraft (
     competition_sign        VARCHAR(4),
     aircraft_model          VARCHAR(64),
     aircraft_type           VARCHAR(32),  -- 'glider', 'tow_plane', 'motor_glider', 'tmg'
+    -- Launch-detection role (overrides aircraft_type mapping when set)
+    role                    VARCHAR(16)
+        CONSTRAINT tenant_aircraft_role_check
+        CHECK (role IS NULL OR role IN ('towplane', 'glider', 'motorglider_sl', 'powered')),
     is_active               BOOLEAN DEFAULT TRUE,
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(airfield_id, flarm_id)
@@ -160,11 +166,20 @@ CREATE TABLE flight_status (
     max_distance_m          INT,
 
     -- Launch type
-    launch_type             VARCHAR(16),  -- 'winch', 'aerotow', 'self', 'unknown'
+    launch_type             VARCHAR(24),  -- winch/aerotow/aerotow_ambiguous/self/powered/unknown
     tow_plane_flarm_id      VARCHAR(16),
     tow_plane_registration  VARCHAR(32),
     release_altitude_m      INT,
+    release_altitude_agl    INT,
     release_time            TIMESTAMPTZ,
+    release_method          VARCHAR(24),  -- pair_separation/towplane_max/winch_vs_drop/winch_profile
+    tow_duration_s          INT,
+    pairing_confidence      REAL,
+
+    -- Landing bookkeeping (touch & go, silence landing)
+    landing_count           INT NOT NULL DEFAULT 1,
+    landing_method          VARCHAR(16),  -- observed/silence
+    landing_confidence      REAL,
 
     -- Signal loss analysis
     signal_loss_scenario    VARCHAR(16),  -- DIVERTED/OUTLANDED/EMERGENCY/SIGNAL_LOST
@@ -199,13 +214,20 @@ CREATE TABLE flight_log (
     max_distance_m          INT,
 
     -- Launch type + F-Schlepp billing
-    launch_type             VARCHAR(16),
+    launch_type             VARCHAR(24),
     tow_plane_flarm_id      VARCHAR(16),
     tow_plane_registration  VARCHAR(32),
     release_altitude_m      INT,
     release_altitude_agl    INT,
     release_time            TIMESTAMPTZ,
+    release_method          VARCHAR(24),
     tow_duration_s          INT,
+    pairing_confidence      REAL,
+
+    -- Landing bookkeeping (touch & go, silence landing)
+    landing_count           INT NOT NULL DEFAULT 1,
+    landing_method          VARCHAR(16),
+    landing_confidence      REAL,
 
     -- Landing info
     landing_type            VARCHAR(16),  -- 'home', 'outlanding', 'diverted'

@@ -168,7 +168,9 @@ async def export_csv(
         takeoff = _format_time(r['takeoff_time'])
         landing = _format_time(r['landing_time'])
         flight_date = _format_date(r['takeoff_time'])
-        launch_map = {'winch': 'Winde', 'aerotow': 'F-Schlepp', 'self': 'Eigen'}
+        launch_map = {'winch': 'Winde', 'aerotow': 'F-Schlepp',
+                      'aerotow_ambiguous': 'F-Schlepp (unsicher)',
+                      'self': 'Eigen', 'powered': 'Motor'}
 
         writer.writerow([
             flight_date,
@@ -214,7 +216,7 @@ async def get_stats(
              takeoff_time::date AS day,
              COUNT(*) AS flights,
              COUNT(*) FILTER (WHERE launch_type = 'winch') AS winch_starts,
-             COUNT(*) FILTER (WHERE launch_type = 'aerotow') AS aerotow_starts,
+             COUNT(*) FILTER (WHERE launch_type IN ('aerotow', 'aerotow_ambiguous')) AS aerotow_starts,
              COUNT(*) FILTER (WHERE launch_type = 'self') AS self_starts,
              COALESCE(AVG(flight_duration_s), 0)::int AS avg_duration_s,
              COALESCE(MAX(max_altitude_m), 0) AS max_altitude_m,

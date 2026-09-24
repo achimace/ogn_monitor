@@ -16,7 +16,13 @@ export type FlightStatus =
   | 'diverted'
   | 'signal_lost'
 
-export type LaunchType = 'winch' | 'aerotow' | 'self' | 'unknown'
+export type LaunchType =
+  | 'winch'
+  | 'aerotow'
+  | 'aerotow_ambiguous'
+  | 'self'
+  | 'powered'
+  | 'unknown'
 
 export type AlarmSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
 

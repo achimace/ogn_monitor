@@ -93,11 +93,16 @@ class StateSynchronizer:
                             takeoff_time, landing_time, last_seen,
                             max_altitude_m, max_distance_m,
                             launch_type, tow_plane_flarm_id, release_altitude_m,
+                            tow_plane_registration, release_altitude_agl,
+                            release_time, release_method, tow_duration_s,
+                            pairing_confidence, landing_count, landing_method,
+                            landing_confidence,
                             updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                             $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                            $20, $21, $22, NOW()
+                            $20, $21, $22, $23, $24, $25, $26, $27, $28,
+                            $29, $30, $31, NOW()
                         )
                         ON CONFLICT (airfield_id, flarm_id) DO UPDATE SET
                             registration = EXCLUDED.registration,
@@ -120,6 +125,15 @@ class StateSynchronizer:
                             launch_type = EXCLUDED.launch_type,
                             tow_plane_flarm_id = EXCLUDED.tow_plane_flarm_id,
                             release_altitude_m = EXCLUDED.release_altitude_m,
+                            tow_plane_registration = EXCLUDED.tow_plane_registration,
+                            release_altitude_agl = EXCLUDED.release_altitude_agl,
+                            release_time = EXCLUDED.release_time,
+                            release_method = EXCLUDED.release_method,
+                            tow_duration_s = EXCLUDED.tow_duration_s,
+                            pairing_confidence = EXCLUDED.pairing_confidence,
+                            landing_count = EXCLUDED.landing_count,
+                            landing_method = EXCLUDED.landing_method,
+                            landing_confidence = EXCLUDED.landing_confidence,
                             updated_at = NOW()
                         """,
                         flight.airfield_id,
@@ -144,6 +158,15 @@ class StateSynchronizer:
                         flight.launch_type,
                         flight.tow_plane_flarm_id or None,
                         flight.release_alt_m or None,
+                        flight.tow_plane_reg or None,
+                        flight.release_alt_agl_m or None,
+                        _parse_iso_or_none(flight.release_time),
+                        flight.release_method or None,
+                        flight.tow_duration_s or None,
+                        flight.pairing_confidence or None,
+                        flight.landing_count,
+                        flight.landing_method or None,
+                        flight.landing_confidence or None,
                     )
                 except Exception:
                     log.exception(
@@ -221,16 +244,32 @@ class StateSynchronizer:
                     max_altitude_m, max_distance_m,
                     launch_type, landing_type,
                     landing_latitude, landing_longitude,
-                    tow_plane_flarm_id, release_altitude_m
+                    tow_plane_flarm_id, release_altitude_m,
+                    tow_plane_registration, release_altitude_agl,
+                    release_time, release_method, tow_duration_s,
+                    pairing_confidence, landing_count, landing_method,
+                    landing_confidence
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                    $16, $17, $18, $19, $20, $21, $22, $23, $24
                 )
                 ON CONFLICT (airfield_id, flarm_id, takeoff_time) DO UPDATE SET
                     landing_time = COALESCE(EXCLUDED.landing_time, flight_log.landing_time),
                     max_altitude_m = GREATEST(EXCLUDED.max_altitude_m, flight_log.max_altitude_m),
                     max_distance_m = GREATEST(EXCLUDED.max_distance_m, flight_log.max_distance_m),
                     launch_type = COALESCE(NULLIF(EXCLUDED.launch_type, 'unknown'), flight_log.launch_type),
-                    landing_type = EXCLUDED.landing_type
+                    landing_type = EXCLUDED.landing_type,
+                    tow_plane_flarm_id = COALESCE(EXCLUDED.tow_plane_flarm_id, flight_log.tow_plane_flarm_id),
+                    tow_plane_registration = COALESCE(EXCLUDED.tow_plane_registration, flight_log.tow_plane_registration),
+                    release_altitude_m = COALESCE(EXCLUDED.release_altitude_m, flight_log.release_altitude_m),
+                    release_altitude_agl = COALESCE(EXCLUDED.release_altitude_agl, flight_log.release_altitude_agl),
+                    release_time = COALESCE(EXCLUDED.release_time, flight_log.release_time),
+                    release_method = COALESCE(EXCLUDED.release_method, flight_log.release_method),
+                    tow_duration_s = COALESCE(EXCLUDED.tow_duration_s, flight_log.tow_duration_s),
+                    pairing_confidence = COALESCE(EXCLUDED.pairing_confidence, flight_log.pairing_confidence),
+                    landing_count = GREATEST(EXCLUDED.landing_count, flight_log.landing_count),
+                    landing_method = COALESCE(EXCLUDED.landing_method, flight_log.landing_method),
+                    landing_confidence = COALESCE(EXCLUDED.landing_confidence, flight_log.landing_confidence)
                 """,
                 flight.airfield_id,
                 flight.flarm_id,
@@ -247,6 +286,15 @@ class StateSynchronizer:
                 flight.longitude if landing_type != "home" else None,
                 flight.tow_plane_flarm_id or None,
                 flight.release_alt_m or None,
+                flight.tow_plane_reg or None,
+                flight.release_alt_agl_m or None,
+                _parse_iso_or_none(flight.release_time),
+                flight.release_method or None,
+                flight.tow_duration_s or None,
+                flight.pairing_confidence or None,
+                flight.landing_count,
+                flight.landing_method or None,
+                flight.landing_confidence or None,
             )
             log.info(
                 "flight_archived",

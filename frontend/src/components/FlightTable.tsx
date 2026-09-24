@@ -308,7 +308,9 @@ function formatLaunchType(lt: string | null): string {
   switch (lt) {
     case 'winch': return 'Winde'
     case 'aerotow': return 'F-Schlepp'
+    case 'aerotow_ambiguous': return 'F-Schlepp?'
     case 'self': return 'Eigen'
+    case 'powered': return 'Motor'
     default: return ''
   }
 }

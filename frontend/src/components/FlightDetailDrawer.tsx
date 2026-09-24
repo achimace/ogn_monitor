@@ -211,7 +211,9 @@ function launchLabel(lt: string): string {
   switch (lt) {
     case 'winch': return 'Winde'
     case 'aerotow': return 'F-Schlepp'
+    case 'aerotow_ambiguous': return 'F-Schlepp (unsicher)'
     case 'self': return 'Eigenstart'
+    case 'powered': return 'Motorflug'
     default: return lt
   }
 }
