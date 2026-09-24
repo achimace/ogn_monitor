@@ -227,12 +227,6 @@ async def test_process_hook_is_noop_without_writer(coord):
     assert await coord.process(s, tenant(), trigger="test") is None
 
 
-async def test_process_hook_signals_missing_ap5_when_writer_set(stores):
-    coord = SyncCoordinator(**stores, writer=object())
-    with pytest.raises(NotImplementedError):
-        await coord.process(None, tenant(), trigger="test")
-
-
 # ---------------------------------------------------------------------------
 # Recovery
 # ---------------------------------------------------------------------------

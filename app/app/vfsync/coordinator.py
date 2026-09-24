@@ -24,10 +24,19 @@ from uuid import UUID
 
 import structlog
 
+from app.vfsync.budget import BudgetGuard, Stage
+from app.vfsync.confidence import WRITABLE_FIELDS
+from app.vfsync.matcher import MatchDecision, match_session
 from app.vfsync.models import AuditEntry, Session, SessionState, TenantConfig, utcnow
 from app.vfsync.stores import AuditStore, BudgetStore, ConfigStore, SessionStore
+from app.vfsync.vf_client.client import VfClient, VfError, VfForbidden
+from app.vfsync.vf_client.models import VfFlight
 
 log = structlog.get_logger()
+
+DEFAULT_LIST_CACHE_S = 300
+# states the worker never touches again
+FINAL_STATES = frozenset({SessionState.COMPLETED, SessionState.EXPIRED, SessionState.REVIEW})
 
 FlightRowFetcher = Callable[[UUID, str, datetime], Awaitable[list[dict[str, Any]]]]
 
@@ -103,15 +112,26 @@ class SyncCoordinator:
         matcher: Any | None = None,
         clock: Callable[[], datetime] = utcnow,
         fetch_flight_rows: FlightRowFetcher | None = None,
+        guard: BudgetGuard | None = None,
+        client_for: Callable[[TenantConfig], VfClient] | None = None,
+        list_cache_s: int = DEFAULT_LIST_CACHE_S,
     ) -> None:
         self.sessions = sessions
         self.audit = audit
         self.budget = budget
         self.config = config
         self.writer = writer
-        self.matcher = matcher
+        self.matcher = matcher or match_session
         self.clock = clock
         self._fetch_flight_rows = fetch_flight_rows
+        self.guard = guard or BudgetGuard(budget, clock=clock)
+        self._client_for = client_for or self._default_client
+        self._list_cache_s = list_cache_s
+        # per tenant: cached flight/list/today, VF clients, monitoring counters
+        self._list_cache: dict[UUID, tuple[datetime, list[VfFlight]]] = {}
+        self._clients: dict[UUID, tuple[tuple, VfClient]] = {}
+        self.write_error_streak: dict[str, int] = {}
+        self.paused: set[str] = set()          # slugs with a 403 login (until config reload)
 
     # ------------------------------------------------------------------
     # Events
@@ -226,19 +246,168 @@ class SyncCoordinator:
             session.add_review_reason("landing_retracted_after_completion")
 
     # ------------------------------------------------------------------
-    # Match + write (filled in by AP-5)
+    # Match + write (AP-5)
     # ------------------------------------------------------------------
 
     async def process(self, session: Session, tenant: TenantConfig, trigger: str) -> Any | None:
-        """Match the session against VF and write - hook for AP-5.
+        """Match the session against VF and write what is due.
 
-        Returns the writer's WriteResult (None while no writer is wired).
+        Live departure (session airborne) only in budget stage NORMAL;
+        after landing_final the whole bundle. Returns the writer's
+        WriteResult, or None when nothing was attempted.
         """
         if self.writer is None:
             log.debug("vfsync_process_noop", slug=tenant.slug,
                       session_id=str(session.session_id), trigger=trigger)
             return None
-        raise NotImplementedError("SyncCoordinator.process: matcher/writer wiring is AP-5")
+        if session.state in FINAL_STATES:
+            return None
+        if tenant.slug in self.paused or not tenant.has_credentials:
+            return None
+
+        movements = await self.sessions.count_today(tenant.airfield_id, self.guard.day_for(tenant))
+        stage = await self.guard.stage(tenant, movements)
+        if stage is Stage.HARD_STOP:
+            log.warning("vfsync_hard_stop", slug=tenant.slug, trigger=trigger)
+            return None
+
+        if session.is_airborne:
+            if session.state == SessionState.DEPARTURE_WRITTEN:
+                return None          # nothing more to write while in the air
+            if stage is not Stage.NORMAL:
+                return None          # live departure is the first thing to give up
+            fields: set[str] | None = {"departuretime"}
+        else:
+            if stage is Stage.AEROTOW_ONLY and not session.is_aerotow:
+                return None          # billing priority: aerotows first
+            fields = None            # bundle: everything still empty in VF
+
+        if session.matched_flid is None:
+            matched = await self._match(session, tenant, fields or set(WRITABLE_FIELDS))
+            if not matched:
+                return None
+
+        result = await self.writer.write(session, tenant, fields)
+        self._track_result(tenant, result)
+        if result.status in ("written", "dryrun") and result.sent:
+            self._patch_cache(tenant, session.matched_flid, result.sent)
+        return result
+
+    async def _match(self, session: Session, tenant: TenantConfig,
+                     target_fields: set[str]) -> bool:
+        """Find the VF flight of a session; persists state/reasons.
+
+        A flid already held by another open session of the tenant is never
+        offered again (one VF flight <-> one session, N-01).
+        """
+        try:
+            flights = await self._flights_today(tenant)
+        except VfError as exc:
+            self._track_exception(tenant, exc)
+            await self.audit.append(AuditEntry(
+                airfield_id=tenant.airfield_id, session_id=session.session_id,
+                action="error", http_status=exc.status,
+                detail=f"list_today:{type(exc).__name__}:{exc}", ts=self.clock(),
+            ))
+            return False
+
+        taken = {
+            s.matched_flid
+            for s in await self.sessions.list_open(airfield_id=tenant.airfield_id)
+            if s.session_id != session.session_id and s.matched_flid is not None
+        }
+        candidates = [f for f in flights if f.flid not in taken]
+        decision: MatchDecision = self.matcher(session, candidates, target_fields)
+
+        for flid in decision.conflict_flids:
+            session.add_review_reason(f"starttype_conflict:{flid}")
+        await self.audit.append(AuditEntry(
+            airfield_id=tenant.airfield_id, session_id=session.session_id,
+            action="match", flid=decision.flid,
+            detail=f"{decision.kind}:{decision.reason}", ts=self.clock(),
+        ))
+
+        if decision.kind == "matched":
+            session.matched_flid = decision.flid
+            if session.state in (SessionState.TRACKING, SessionState.AWAITING_MATCH):
+                session.state = SessionState.MATCHED
+        elif decision.kind == "awaiting_match":
+            session.state = SessionState.AWAITING_MATCH
+        else:  # ambiguous / starttype_conflict -> a human decides
+            session.add_review_reason(decision.reason)
+            session.state = SessionState.REVIEW
+        await self.sessions.save(session)
+        log.info("vfsync_match", slug=tenant.slug, session_id=str(session.session_id),
+                 kind=decision.kind, flid=decision.flid, reason=decision.reason)
+        return decision.kind == "matched"
+
+    async def _flights_today(self, tenant: TenantConfig) -> list[VfFlight]:
+        """`flight/list/today` with a per-tenant cache (Kap. 4.2)."""
+        now = self.clock()
+        cached = self._list_cache.get(tenant.airfield_id)
+        if cached and (now - cached[0]).total_seconds() < self._list_cache_s:
+            return cached[1]
+        if not await self.guard.reserve(tenant, 1):
+            raise VfError("budget exhausted for flight/list/today")
+        flights = await self.client_for(tenant).list_today()
+        self._list_cache[tenant.airfield_id] = (now, flights)
+        return flights
+
+    def invalidate_list_cache(self, tenant: TenantConfig | None = None) -> None:
+        if tenant is None:
+            self._list_cache.clear()
+        else:
+            self._list_cache.pop(tenant.airfield_id, None)
+
+    def _patch_cache(self, tenant: TenantConfig, flid: int | None, sent: dict[str, Any]) -> None:
+        """Reflect a write in the cached list so the next match sees it."""
+        cached = self._list_cache.get(tenant.airfield_id)
+        if not cached or flid is None:
+            return
+        for f in cached[1]:
+            if f.flid == flid:
+                for k, v in sent.items():
+                    setattr(f, k, v)
+
+    def client_for(self, tenant: TenantConfig) -> VfClient:
+        """VfClient per tenant, rebuilt when credentials change."""
+        key = (tenant.vf_base_url, tenant.vf_username, tenant.vf_password_md5,
+               tenant.vf_appkey, tenant.vf_cid)
+        cached = self._clients.get(tenant.airfield_id)
+        if cached and cached[0] == key:
+            return cached[1]
+        client = self._client_for(tenant)
+        self._clients[tenant.airfield_id] = (key, client)
+        return client
+
+    def _default_client(self, tenant: TenantConfig) -> VfClient:
+        return VfClient(
+            tenant.vf_base_url, tenant.vf_username or "", tenant.vf_password_md5 or "",
+            tenant.vf_appkey or "", tenant.vf_cid, on_request=self.guard.hook_for(tenant),
+        )
+
+    def _track_result(self, tenant: TenantConfig, result: Any) -> None:
+        if result.status == "error":
+            self.write_error_streak[tenant.slug] = self.write_error_streak.get(tenant.slug, 0) + 1
+            if "login_forbidden" in result.reasons:
+                self._pause(tenant)
+        elif result.status in ("written", "dryrun"):
+            self.write_error_streak[tenant.slug] = 0
+
+    def _track_exception(self, tenant: TenantConfig, exc: VfError) -> None:
+        self.write_error_streak[tenant.slug] = self.write_error_streak.get(tenant.slug, 0) + 1
+        if isinstance(exc, VfForbidden):
+            self._pause(tenant)
+
+    def _pause(self, tenant: TenantConfig) -> None:
+        if tenant.slug not in self.paused:
+            log.error("vfsync_tenant_paused", slug=tenant.slug, reason="login_forbidden")
+        self.paused.add(tenant.slug)
+
+    def resume(self, tenant: TenantConfig) -> None:
+        """Config reload (new credentials) lifts a login pause."""
+        self.paused.discard(tenant.slug)
+        self._clients.pop(tenant.airfield_id, None)
 
     # ------------------------------------------------------------------
     # Recovery
