@@ -36,9 +36,30 @@ interface AircraftForm {
   aircraft_type: string
 }
 
+/** Ignore-list entry: /api/airfields/{airfield_id}/ignored-aircraft (camelCase response). */
+interface IgnoredAircraft {
+  id: string
+  flarmId: string
+  note?: string | null
+  createdAt?: string | null
+}
+
+interface IgnoreForm {
+  flarm_id: string
+  note: string
+}
+
 const EMPTY_FORM: AircraftForm = {
   registration: '', competition_sign: '', flarm_id: '',
   aircraft_model: '', aircraft_type: 'glider',
+}
+
+const EMPTY_IGNORE_FORM: IgnoreForm = { flarm_id: '', note: '' }
+
+function formatDate(iso?: string | null): string {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleDateString('de-DE')
 }
 
 const inputClass = 'w-full bg-tower-bg border border-tower-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-tower-qdr'
@@ -56,6 +77,11 @@ export default function AircraftManagePage() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<CsvImportResult | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Ignore list (per airfield): errors are shown inline within its own section
+  const [ignored, setIgnored] = useState<IgnoredAircraft[]>([])
+  const [ignoreForm, setIgnoreForm] = useState<IgnoreForm>(EMPTY_IGNORE_FORM)
+  const [ignoreSaving, setIgnoreSaving] = useState(false)
+  const [ignoreError, setIgnoreError] = useState('')
 
   useEffect(() => { loadAirfield() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -65,7 +91,7 @@ export default function AircraftManagePage() {
       if (airfields.length > 0) {
         const afId = airfields[0]!.id
         setAirfieldId(afId)
-        await loadAircraft(afId)
+        await Promise.all([loadAircraft(afId), loadIgnored(afId)])
       } else {
         setError('Bitte zuerst einen Flugplatz anlegen')
         setLoading(false)
@@ -168,6 +194,58 @@ export default function AircraftManagePage() {
       setError(e instanceof ApiError ? e.message : 'CSV-Import fehlgeschlagen')
     } finally {
       setImporting(false)
+    }
+  }
+
+  async function loadIgnored(afId?: string) {
+    const id = afId || airfieldId
+    if (!id) return
+    try {
+      const data = await api.get<IgnoredAircraft[]>(`/airfields/${id}/ignored-aircraft`)
+      setIgnored(data)
+    } catch (e) {
+      setIgnoreError(e instanceof ApiError ? e.message : 'Laden fehlgeschlagen')
+    }
+  }
+
+  async function handleIgnoreSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!airfieldId) return
+    const flarmId = ignoreForm.flarm_id.trim().toUpperCase()
+    const note = ignoreForm.note.trim()
+    if (!/^[0-9A-F]{4,16}$/.test(flarmId)) {
+      setIgnoreError('FLARM-ID muss 4-16 Hex-Zeichen haben (z. B. DD0239)')
+      return
+    }
+    setIgnoreSaving(true)
+    setIgnoreError('')
+    try {
+      await api.post(`/airfields/${airfieldId}/ignored-aircraft`, {
+        flarm_id: flarmId,
+        ...(note ? { note } : {}),
+      })
+      setIgnoreForm(EMPTY_IGNORE_FORM)
+      await loadIgnored()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setIgnoreError(`${flarmId}: Bereits in der Liste`)
+      } else {
+        setIgnoreError(e instanceof ApiError ? e.message : 'Speichern fehlgeschlagen')
+      }
+    } finally {
+      setIgnoreSaving(false)
+    }
+  }
+
+  async function handleIgnoreRemove(flarmId: string) {
+    if (!airfieldId) return
+    if (!window.confirm(`${flarmId} nicht mehr ignorieren?`)) return
+    setIgnoreError('')
+    try {
+      await api.delete(`/airfields/${airfieldId}/ignored-aircraft/${flarmId}`)
+      await loadIgnored()
+    } catch (e) {
+      setIgnoreError(e instanceof ApiError ? e.message : 'Loeschen fehlgeschlagen')
     }
   }
 
@@ -311,6 +389,81 @@ export default function AircraftManagePage() {
             )}
           </tbody>
         </table>
+      </div>
+
+      {/* Ignore list */}
+      <div className="mt-10">
+        <h2 className="text-xl font-bold text-white mb-2">Ignorierte Geraete</h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Beacons dieser FLARM-/ICAO-IDs werden fuer diesen Flugplatz verworfen – z. B. Hubschrauber
+          einer nahen Klinik, die langsam ueber den Platz fliegen. Wirkt innerhalb weniger Sekunden;
+          bestehende Flugbucheintraege bleiben.
+        </p>
+
+        {ignoreError && (
+          <div className="bg-red-900/50 border border-red-500 text-red-200 rounded-lg p-3 mb-4 text-sm">{ignoreError}</div>
+        )}
+
+        <div className="bg-tower-surface border border-tower-border rounded-xl p-6 mb-6">
+          <form onSubmit={handleIgnoreSubmit} className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <Input
+              label="FLARM-ID"
+              value={ignoreForm.flarm_id}
+              onChange={(v) => setIgnoreForm({ ...ignoreForm, flarm_id: v.toUpperCase() })}
+              placeholder="3D1234"
+              required
+            />
+            <Input
+              label="Notiz (optional)"
+              value={ignoreForm.note}
+              onChange={(v) => setIgnoreForm({ ...ignoreForm, note: v.slice(0, 120) })}
+              placeholder="Rettungshubschrauber Klinik"
+            />
+            <div className="flex items-end">
+              <button
+                type="submit"
+                disabled={!airfieldId || ignoreSaving}
+                className="bg-tower-qdr hover:bg-cyan-500 text-white text-sm font-semibold rounded-lg px-6 py-2.5 transition-colors disabled:opacity-50"
+              >
+                {ignoreSaving ? 'Speichern...' : 'Ignorieren'}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div className="bg-tower-surface border border-tower-border rounded-xl overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-tower-border text-left text-gray-500 uppercase text-xs">
+                <th className="px-4 py-3">FLARM-ID</th>
+                <th className="px-4 py-3">Notiz</th>
+                <th className="px-4 py-3">Seit</th>
+                <th className="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {ignored.length === 0 ? (
+                <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-500">Keine ignorierten Geraete</td></tr>
+              ) : (
+                ignored.map((ig) => (
+                  <tr key={ig.id} className="border-b border-tower-border/50 hover:bg-white/5">
+                    <td className="px-4 py-3 text-white font-mono">{ig.flarmId}</td>
+                    <td className="px-4 py-3 text-gray-300">{ig.note || '-'}</td>
+                    <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{formatDate(ig.createdAt)}</td>
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                      <button
+                        onClick={() => handleIgnoreRemove(ig.flarmId)}
+                        className="text-gray-500 hover:text-red-400 text-xs px-2 py-1"
+                      >
+                        Entfernen
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )
