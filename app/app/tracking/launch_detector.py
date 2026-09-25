@@ -215,6 +215,38 @@ class LaunchDetector:
         if state and state.tow_plane_id:
             self._release_assignment(state)
 
+    def forget_partner(self, airfield_slug: str, flarm_id: str) -> list[str]:
+        """Drop an aircraft from every pending detection that refers to it.
+
+        DDB ``tracked = N`` eviction: the aircraft must not surface as tow
+        plane (id / registration) in a partner's result. Its pairing is
+        cancelled, its tow-side observations are discarded and it is
+        barred from being scored again; the partner's own detection
+        simply continues without it.
+
+        Returns:
+            FLARM ids of the gliders that were paired with the aircraft.
+        """
+        affected: list[str] = []
+        for state in self._pending.values():
+            if state.airfield_slug != airfield_slug or state.flarm_id == flarm_id:
+                continue
+            if state.tow_plane_id == flarm_id:
+                self._release_assignment(state)
+                state.tow_plane_id = ""
+                state.tow_plane_reg = ""
+                state.paired_beacons = 0
+                state.ambiguous = False
+                state.separated_ts = 0.0
+                state.tow_max_alt = 0.0
+                state.tow_max_alt_ts = 0.0
+                state.tow_descent_beacons = 0
+                affected.append(state.flarm_id)
+            state.candidates.pop(flarm_id, None)
+            state.rejected.add(flarm_id)
+        self._tow_assignments.pop((airfield_slug, flarm_id), None)
+        return affected
+
     # ------------------------------------------------------------------
     # Glider side
     # ------------------------------------------------------------------

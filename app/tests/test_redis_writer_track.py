@@ -32,6 +32,11 @@ class FakeRedis:
     def __init__(self, fail_with: Exception | None = None):
         self.executed: list[list[tuple]] = []
         self.fail_with = fail_with
+        self.deleted: list[str] = []
+
+    async def delete(self, *keys):
+        self.deleted.extend(keys)
+        return len(keys)
 
     def pipeline(self):
         return FakePipeline(self)
@@ -117,3 +122,10 @@ async def test_other_redis_errors_propagate():
     redis = FakeRedis(fail_with=ConnectionError("redis gone"))
     with pytest.raises(ConnectionError):
         await _add(RedisWriter(redis))
+
+
+async def test_delete_track_removes_the_stream_key(redis):
+    """DDB tracked=N eviction drops the whole 24 h track of the device."""
+    await RedisWriter(redis).delete_track("test", "DDA5BA")
+    assert redis.deleted == ["track:test:DDA5BA"]
+    assert redis.executed == []  # plain DEL, no pipeline

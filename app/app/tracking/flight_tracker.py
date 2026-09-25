@@ -8,9 +8,15 @@ Coordinates all tracking components:
 - Event publishing via Redis PubSub
 
 This is the main entry point called by the APRS Worker for each beacon.
+
+OGN DDB privacy: this class is the single choke point for the DDB
+``tracked = N`` opt-out. Beacons of such devices are dropped here, before
+any state machine, hot-state, track-stream, event or flight_log write
+(see docs/dev-guides/implement-flight-logic.md).
 """
 
 import asyncio
+import time
 
 import structlog
 
@@ -24,6 +30,14 @@ from app.tracking.launch_detector import LaunchDetector
 from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE, RedisWriter
 
 log = structlog.get_logger()
+
+# Dropped beacons of an untracked device are logged (debug) at most once
+# per device within this interval - a switched-on FLARM sends ~1 beacon/s.
+UNTRACKED_LOG_INTERVAL_S = 3600
+
+# flight_status rows of evicted (tracked = N) aircraft whose DELETE failed
+# are retried in check_timeouts(); the retry set is bounded, best effort.
+STATUS_DELETE_RETRY_MAX = 64
 
 
 class FlightTracker:
@@ -54,6 +68,14 @@ class FlightTracker:
         # per-aircraft track stream, keyed by "{slug}:{flarm_id}" (thinning).
         self._last_track_ts: dict[str, float] = {}
 
+        # DDB tracked=N: dropped-beacon counter and last debug-log time
+        # (monotonic) per flarm_id, for the rate-limited log only.
+        self._untracked_drops: dict[str, int] = {}
+        self._untracked_logged_at: dict[str, float] = {}
+        # (airfield_id, flarm_id) of evicted flights whose flight_status
+        # DELETE failed; retried in check_timeouts().
+        self._status_delete_retry: set[tuple[int, str]] = set()
+
     def set_configs(self, configs: dict[str, AirfieldConfig]) -> None:
         """Update airfield configurations."""
         self._configs = configs
@@ -67,6 +89,11 @@ class FlightTracker:
         # Stage 1: Parse beacon
         beacon = parse_beacon(line)
         if not beacon:
+            return
+
+        # DDB privacy: opted-out devices never reach any airfield
+        if self._is_untracked(beacon.flarm_id):
+            await self._drop_untracked_beacon(beacon)
             return
 
         # Stage 2: Try each airfield config
@@ -87,6 +114,12 @@ class FlightTracker:
         Returns the updated FlightState or None if discarded.
         """
         slug = config.slug
+
+        # DDB privacy choke point (also for direct callers / tests):
+        # nothing below may run for an opted-out device.
+        if self._is_untracked(beacon.flarm_id):
+            await self._drop_untracked_beacon(beacon)
+            return None
 
         # Check if we're already tracking this flight at this airfield
         existing = self.state_machine.get_flight(slug, beacon.flarm_id)
@@ -196,6 +229,11 @@ class FlightTracker:
 
         Called periodically (~30s) by the worker.
         """
+        # DDB reload may have flipped tracked -> N for a flight in progress
+        # whose FLARM is already off (no beacon will ever evict it).
+        await self._evict_untracked_flights()
+        await self._retry_flight_status_deletes()
+
         changed = self.state_machine.check_timeouts(self._configs)
 
         for flight in changed:
@@ -290,6 +328,13 @@ class FlightTracker:
                     if data.get(SIMULATED_FIELD) == SIMULATED_VALUE:
                         log.info("flight_recovery_skipped_simulated", slug=slug, flarm_id=fid)
                         continue
+                    if self._is_untracked(fid):
+                        # DDB opt-out while the worker was down: purge
+                        # instead of restoring (no flight_log either).
+                        await self.redis_writer.remove_flight(slug, fid)
+                        await self.redis_writer.delete_track(slug, fid)
+                        log.info("flight_recovery_dropped_untracked", slug=slug, flarm_id=fid)
+                        continue
                     flight = FlightState.from_redis(data, slug)
                     if flight.flarm_id:
                         config = self._configs.get(slug)
@@ -317,6 +362,137 @@ class FlightTracker:
             airfield=airfield_slug,
             launch_type=flight.launch_type,
         )
+
+    # ------------------------------------------------------------------
+    # OGN DDB privacy: tracked = N
+    # ------------------------------------------------------------------
+
+    def _is_untracked(self, flarm_id: str) -> bool:
+        """True if the DDB says the device owner opted out of tracking."""
+        info = self.aircraft_resolver.resolve(flarm_id)
+        return info is not None and not info.tracked
+
+    async def _drop_untracked_beacon(self, beacon: Beacon) -> None:
+        """Discard a beacon of an opted-out device.
+
+        Evicts the aircraft from every airfield where it is still tracked
+        (the flag may have flipped on a DDB reload while it was flying),
+        counts the drop and logs at debug level at most once per device
+        and UNTRACKED_LOG_INTERVAL_S.
+        """
+        fid = beacon.flarm_id
+        for slug in list(self._configs):
+            flight = self.state_machine.get_flight(slug, fid)
+            if flight is not None:
+                await self._evict_untracked_flight(slug, flight)
+            self.state_machine.discard_ground_contact(slug, fid)
+
+        count = self._untracked_drops.get(fid, 0) + 1
+        self._untracked_drops[fid] = count
+        now = time.monotonic()
+        last = self._untracked_logged_at.get(fid)
+        if last is None or now - last >= UNTRACKED_LOG_INTERVAL_S:
+            self._untracked_logged_at[fid] = now
+            log.debug("beacon_dropped_untracked", flarm_id=fid, dropped=count)
+
+    async def _evict_untracked_flights(self) -> None:
+        """Evict every active flight whose device is (now) untracked."""
+        for flight in list(self.state_machine.get_all_active_flights()):
+            if self._is_untracked(flight.flarm_id):
+                await self._evict_untracked_flight(flight.airfield_slug, flight)
+
+    async def _evict_untracked_flight(self, slug: str, flight: FlightState) -> None:
+        """Remove a flight of an opted-out device from every store.
+
+        Unlike a normal archive this also drops the 24 h track stream and
+        the flight_status row, and it never writes flight_log. Events the
+        eviction might leave behind are discarded, not published; flights
+        paired with the evicted aircraft (tow partner) lose every
+        reference to it before anything is written.
+        """
+        fid = flight.flarm_id
+        await self._blank_partner_refs(slug, fid)
+        await self._archive_flight(slug, flight)
+        await self.redis_writer.delete_track(slug, fid)
+        await self._delete_flight_status(flight)
+        # Nothing about this aircraft may reach subscribers; events of
+        # other aircraft (e.g. a tow partner) are kept and go out now,
+        # not on the next beacon.
+        pending = self.state_machine.drain_events() + self.launch_detector.drain_events()
+        self.state_machine.requeue_events(
+            [e for e in pending if e["flarm_id"] != fid]
+        )
+        log.info(
+            "flight_evicted_untracked",
+            flarm_id=fid,
+            airfield=slug,
+            status=flight.status.name,
+        )
+        await self._dispatch_events()
+
+    async def _blank_partner_refs(self, slug: str, flarm_id: str) -> None:
+        """Remove an evicted aircraft from the flights it was paired with.
+
+        Pending detections forget the pairing (launch detector); flights
+        already resolved with it as tow plane get ``tow_plane_flarm_id`` /
+        ``tow_plane_reg`` blanked and their hot-state hash rewritten so
+        that no later event, sync or archive carries the reference.
+        """
+        self.launch_detector.forget_partner(slug, flarm_id)
+        for other in self.state_machine.get_all_flights(slug).values():
+            if other.flarm_id == flarm_id or other.tow_plane_flarm_id != flarm_id:
+                continue
+            other.tow_plane_flarm_id = ""
+            other.tow_plane_reg = ""
+            ttl = None
+            if other.status == FlightStatus.LANDING:
+                cfg = self._configs.get(slug)
+                if cfg is not None:
+                    ttl = cfg.sticky_landed_max_age_s + 3600
+            await self.redis_writer.update_flight(
+                slug, other.flarm_id, other.to_redis_dict(), ttl=ttl
+            )
+            log.info(
+                "flight_partner_reference_blanked",
+                flarm_id=other.flarm_id,
+                partner=flarm_id,
+                airfield=slug,
+            )
+
+    async def _delete_flight_status(self, flight: FlightState) -> None:
+        """Delete the cold-store flight_status row of an evicted flight.
+
+        A failed DELETE is remembered (bounded) and retried in
+        ``check_timeouts()``.
+        """
+        key = (flight.airfield_id, flight.flarm_id)
+        if await self._try_delete_flight_status(*key):
+            return
+        if len(self._status_delete_retry) < STATUS_DELETE_RETRY_MAX:
+            self._status_delete_retry.add(key)
+        else:
+            log.warning(
+                "flight_status_delete_retry_dropped",
+                flarm_id=flight.flarm_id,
+                pending=len(self._status_delete_retry),
+            )
+
+    async def _try_delete_flight_status(self, airfield_id: int, flarm_id: str) -> bool:
+        """One DELETE attempt; True on success, False (logged) on error."""
+        try:
+            from app.db.connection import get_db
+            db = get_db()
+            await self._state_sync.delete_flight_status(db, airfield_id, flarm_id)
+            return True
+        except Exception:
+            log.exception("flight_status_delete_failed", flarm_id=flarm_id)
+            return False
+
+    async def _retry_flight_status_deletes(self) -> None:
+        """Retry the flight_status DELETEs that failed earlier (best effort)."""
+        for key in list(self._status_delete_retry):
+            if await self._try_delete_flight_status(*key):
+                self._status_delete_retry.discard(key)
 
     async def _archive_to_log(self, flight: FlightState) -> None:
         """Persist a completed flight to the flight_log table."""

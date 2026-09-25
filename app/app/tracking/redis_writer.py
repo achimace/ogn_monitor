@@ -194,6 +194,14 @@ class RedisWriter:
         pipe.delete(f"flight:{airfield_slug}:{flarm_id}")
         await pipe.execute()
 
+    async def delete_track(self, airfield_slug: str, flarm_id: str) -> None:
+        """Drop the per-aircraft track stream (DDB tracked=N eviction).
+
+        Not called on a normal archive: the 24 h track deliberately
+        outlives the flight for the monitor map.
+        """
+        await self._redis.delete(f"track:{airfield_slug}:{flarm_id}")
+
     async def update_health(self, health: dict[str, Any]) -> None:
         """Update OGN connection health status."""
         str_health = {k: str(v) for k, v in health.items()}

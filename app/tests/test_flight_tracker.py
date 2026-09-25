@@ -3,11 +3,13 @@
 Uses an in-memory RedisWriter stand-in; PostgreSQL archiving is stubbed.
 """
 
-from unittest.mock import AsyncMock
+from dataclasses import replace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.config import settings
+from app.data.aircraft_resolver import AircraftInfo
 from app.tracking.flight_state import FlightState, FlightStatus
 from app.tracking.flight_tracker import FlightTracker
 from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE
@@ -28,24 +30,32 @@ class FakeRedisWriter:
         self.flights: dict[tuple[str, str], dict] = {}
         self.events: list[tuple[str, str, str]] = []
         self.track_points: list[tuple[str, str, int]] = []
+        self.beacons: list[tuple[str, str]] = []
+        self.positions: list[tuple[str, str]] = []
+        self.deleted_tracks: list[tuple[str, str]] = []
+        self.event_payloads: list[tuple[str, dict, str]] = []
 
     async def update_flight(self, slug, fid, data, ttl=None):
         self.flights[(slug, fid)] = data
 
     async def publish_beacon(self, slug, fid, data):
-        pass
+        self.beacons.append((slug, fid))
 
     async def add_position(self, slug, fid, *args):
-        pass
+        self.positions.append((slug, fid))
 
     async def add_track_point(self, slug, fid, ts_ms, *args, retention_s=0, min_interval_s=0):
         self.track_points.append((slug, fid, ts_ms))
 
     async def publish_event(self, slug, etype, fid, data=None, message=""):
         self.events.append((slug, etype, fid))
+        self.event_payloads.append((fid, dict(data or {}), message))
 
     async def remove_flight(self, slug, fid):
         self.flights.pop((slug, fid), None)
+
+    async def delete_track(self, slug, fid):
+        self.deleted_tracks.append((slug, fid))
 
     async def get_active_flights(self, slug):
         return {fid for (s, fid) in self.flights if s == slug}
@@ -55,11 +65,17 @@ class FakeRedisWriter:
 
 
 class FakeResolver:
+    """In-memory AircraftResolver stand-in: ``infos`` is the cache."""
+
+    def __init__(self, infos: dict[str, AircraftInfo] | None = None):
+        self.infos = infos or {}
+        self.aprs_updates: list[tuple[str, str]] = []
+
     def resolve(self, flarm_id):
-        return None
+        return self.infos.get(flarm_id)
 
     def update_from_aprs(self, flarm_id, registration):
-        pass
+        self.aprs_updates.append((flarm_id, registration))
 
 
 @pytest.fixture
@@ -67,6 +83,7 @@ def tracker():
     t = FlightTracker(FakeRedisWriter(), FakeResolver())
     t.set_configs({"test": make_config()})
     t._archive_to_log = AsyncMock()
+    t._delete_flight_status = AsyncMock()
     return t
 
 
@@ -219,3 +236,374 @@ async def test_track_thinning_state_is_cleared_on_archive(tracker):
     # the next flight of the same aircraft writes right away
     await _feed(tracker, ground_roll(GLD, t0=16))
     assert len(_track_writes(tracker)) == 2
+
+
+# ---------------------------------------------------------------------------
+# OGN DDB privacy flags (tracked / identified)
+# ---------------------------------------------------------------------------
+
+def _info(fid: str, *, tracked=True, identified=True, registration="",
+          competition_sign="", source="ogn_ddb", role="") -> AircraftInfo:
+    return AircraftInfo(
+        flarm_id=fid, registration=registration, aircraft_model="ASK 21",
+        competition_sign=competition_sign, aircraft_type=1, source=source,
+        tracked=tracked, identified=identified, role=role,
+    )
+
+
+def _flying(fid: str, t: float):
+    return beacon(fid, t, east=3500, alt=AF_ELEV + 400, speed=95)
+
+
+async def test_untracked_device_beacons_are_dropped_entirely(tracker):
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, tracked=False, registration="D-SECR")
+
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+
+    rw = tracker.redis_writer
+    assert tracker.state_machine.get_all_active_flights() == []
+    assert tracker.state_machine._ground_cache.get("test", {}) == {}
+    assert rw.flights == {} and rw.events == [] and rw.track_points == []
+    assert rw.beacons == [] and rw.positions == []
+    assert not tracker.launch_detector.is_pending(GLD)
+    tracker._archive_to_log.assert_not_awaited()
+    assert tracker._untracked_drops[GLD] == 9
+
+
+async def test_untracked_device_is_dropped_even_when_tenant_registered(tracker):
+    """build_cache keeps tracked=False on a tenant override; the tracker
+    must honour it regardless of the source."""
+    tracker.aircraft_resolver.infos[GLD] = _info(
+        GLD, tracked=False, registration="D-CLUB", source="tenant")
+    await _feed(tracker, ground_roll(GLD))
+    assert tracker.state_machine.get_all_active_flights() == []
+    assert tracker.redis_writer.flights == {}
+
+
+async def test_process_line_drops_untracked_before_any_airfield(tracker, monkeypatch):
+    tracker.set_configs({"test": make_config(), "other": make_config(id=2, slug="other")})
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, tracked=False)
+    b = ground_roll(GLD)[0]
+    monkeypatch.setattr("app.tracking.flight_tracker.parse_beacon", lambda line: b)
+    per_airfield = AsyncMock()
+    monkeypatch.setattr(tracker, "_process_beacon_for_airfield", per_airfield)
+
+    await tracker.process_line("raw aprs line")
+
+    per_airfield.assert_not_awaited()
+    assert tracker._untracked_drops[GLD] == 1  # counted once, not per airfield
+
+
+async def test_untracked_drop_is_logged_once_per_hour(tracker, monkeypatch):
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, tracked=False)
+    fake_log = MagicMock()
+    monkeypatch.setattr("app.tracking.flight_tracker.log", fake_log)
+
+    await _feed(tracker, ground_roll(GLD)[:3])
+    assert fake_log.debug.call_count == 1
+    assert fake_log.debug.call_args.kwargs == {"flarm_id": GLD, "dropped": 1}
+
+    # An hour later the next drop is logged again with the running total
+    tracker._untracked_logged_at[GLD] -= 3601
+    await _feed(tracker, ground_roll(GLD)[3:4])
+    assert fake_log.debug.call_count == 2
+    assert fake_log.debug.call_args.kwargs == {"flarm_id": GLD, "dropped": 4}
+    fake_log.info.assert_not_called()
+
+
+async def test_unidentified_device_is_labelled_by_flarm_id_only(tracker):
+    # build_cache already blanked registration / CN for identified=N
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, identified=False)
+    # ... and the APRS stream must not re-identify it either
+    roll = [replace(b, registration="D-1234") for b in ground_roll(GLD)]
+
+    flight = await _feed(tracker, roll)
+
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+    assert flight.registration == ""
+    assert flight.competition_sign == ""
+    assert flight.aircraft_model == "ASK 21"
+    assert tracker.aircraft_resolver.aprs_updates == []
+    data = tracker.redis_writer.flights[("test", GLD)]
+    assert data["registration"] == "" and data["competition_sign"] == ""
+    assert data["flarm_id"] == GLD
+
+
+async def test_tenant_registered_unidentified_device_keeps_tenant_registration(tracker):
+    tracker.aircraft_resolver.infos[GLD] = _info(
+        GLD, identified=True, registration="D-CLUB", competition_sign="CL", source="tenant")
+    roll = [replace(b, registration="D-OTHER") for b in ground_roll(GLD)]
+
+    flight = await _feed(tracker, roll)
+
+    assert flight.registration == "D-CLUB"
+    assert flight.competition_sign == "CL"
+    assert tracker.redis_writer.flights[("test", GLD)]["registration"] == "D-CLUB"
+
+
+async def test_aprs_registration_still_used_for_device_unknown_to_ddb(tracker):
+    roll = [replace(b, registration="D-APRS") for b in ground_roll(GLD)]
+    flight = await _feed(tracker, roll)
+    assert flight.registration == "D-APRS"
+    assert tracker.aircraft_resolver.aprs_updates == [(GLD, "D-APRS")]
+
+
+async def test_ddb_reload_flipping_tracked_evicts_flying_aircraft(tracker):
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, registration="D-1234")
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    assert tracker.state_machine.get_flight("test", GLD).status == FlightStatus.FLYING
+    assert ("test", GLD) in tracker.redis_writer.flights
+    events_before = list(tracker.redis_writer.events)
+    tracks_before = len(tracker.redis_writer.track_points)
+
+    # DDB reload: the owner opted out while the flight is in progress
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    assert await _feed(tracker, [_flying(GLD, 60)]) is None
+
+    rw = tracker.redis_writer
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert ("test", GLD) not in rw.flights
+    assert rw.deleted_tracks == [("test", GLD)]
+    assert len(rw.track_points) == tracks_before
+    assert rw.events == events_before          # no removal / archive event
+    assert not tracker.launch_detector.is_pending(GLD)
+    assert f"test:{GLD}" not in tracker._last_track_ts
+    tracker._archive_to_log.assert_not_awaited()
+    tracker._delete_flight_status.assert_awaited_once()
+    assert tracker._delete_flight_status.await_args.args[0].flarm_id == GLD
+
+    # Stays gone on further beacons
+    assert await _feed(tracker, [_flying(GLD, 63)]) is None
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert rw.events == events_before
+    assert tracker._untracked_drops[GLD] == 2
+
+
+async def test_eviction_keeps_pending_events_of_other_aircraft(tracker):
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    # A pending event of another aircraft must survive the eviction
+    other = FlightState(flarm_id="GLD002", airfield_slug="test")
+    tracker.state_machine._emit_event("test", "takeoff", "GLD002", other)
+    tracker.state_machine._emit_event("test", "takeoff", GLD, tracker.state_machine.get_flight("test", GLD))
+
+    events_before = list(tracker.redis_writer.events)
+
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await _feed(tracker, [_flying(GLD, 60)])
+
+    # ... and is published by the eviction itself, not delayed until the
+    # next beacon of some other aircraft
+    new_events = tracker.redis_writer.events[len(events_before):]
+    assert new_events == [("test", "takeoff", "GLD002")]
+    assert tracker.state_machine.drain_events() == []
+    assert tracker.launch_detector.drain_events() == []
+
+
+async def test_check_timeouts_evicts_untracked_flight_without_beacon(tracker):
+    """FLARM already off when the flag flips: no beacon will ever evict."""
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    events_before = list(tracker.redis_writer.events)
+
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await tracker.check_timeouts()
+
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert ("test", GLD) not in tracker.redis_writer.flights
+    assert tracker.redis_writer.deleted_tracks == [("test", GLD)]
+    assert tracker.redis_writer.events == events_before
+    tracker._archive_to_log.assert_not_awaited()
+
+
+async def test_ground_contact_is_forgotten_when_tracked_flips(tracker):
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD)[:2])   # parked at home
+    assert GLD in tracker.state_machine._ground_cache["test"]
+
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await _feed(tracker, ground_roll(GLD)[2:])
+
+    assert GLD not in tracker.state_machine._ground_cache["test"]
+    assert tracker.state_machine.get_flight("test", GLD) is None
+
+
+async def test_recover_from_redis_purges_untracked_flights(tracker):
+    tracker.aircraft_resolver.infos["SECRET"] = _info("SECRET", tracked=False)
+    real = FlightState(flarm_id=GLD, airfield_slug="test", registration="D-REAL",
+                       status=FlightStatus.FLYING, takeoff_time="2026-09-25T10:00:00Z")
+    secret = FlightState(flarm_id="SECRET", airfield_slug="test",
+                         status=FlightStatus.FLYING, takeoff_time="2026-09-25T10:05:00Z")
+    tracker.redis_writer.flights[("test", GLD)] = real.to_redis_dict()
+    tracker.redis_writer.flights[("test", "SECRET")] = secret.to_redis_dict()
+
+    restored = await tracker.recover_from_redis()
+
+    assert restored == 1
+    assert tracker.state_machine.get_flight("test", GLD) is not None
+    assert tracker.state_machine.get_flight("test", "SECRET") is None
+    assert set(tracker.redis_writer.flights) == {("test", GLD)}
+    assert tracker.redis_writer.deleted_tracks == [("test", "SECRET")]
+    tracker._archive_to_log.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# tracked = N flips on a tow plane: the partner must lose every reference
+# ---------------------------------------------------------------------------
+
+TOW = "TOW001"
+
+
+def _tow_pair_takeoff(n_climb: int):
+    """Tow plane + glider roll and climb attached (tow 50 m ahead)."""
+    from tests.test_launch_detector import _interleave, pair_climb
+    roll = _interleave(ground_roll(TOW), ground_roll(GLD))
+    climb = _interleave(pair_climb(TOW, 18, n_climb, east_offset=50),
+                        pair_climb(GLD, 18, n_climb))
+    last_t = 18 + 3 * (n_climb - 1)
+    last_alt = AF_ELEV + 60 + 7.5 * n_climb
+    last_east = 150 + 80 * n_climb
+    return roll + climb, last_t, last_alt, last_east
+
+
+def _payloads_since(tracker: FlightTracker, n: int):
+    return tracker.redis_writer.event_payloads[n:]
+
+
+def _mentions(payloads, *needles: str) -> bool:
+    for _fid, data, message in payloads:
+        blob = message + " " + " ".join(str(v) for v in data.values())
+        if any(n in blob for n in needles):
+            return True
+    return False
+
+
+async def test_tow_plane_eviction_mid_tow_blanks_partner_pairing(tracker):
+    tracker.aircraft_resolver.infos[TOW] = _info(TOW, registration="D-ETOW", role="towplane")
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, registration="D-1234", role="glider")
+    seq, last_t, _alt, _east = _tow_pair_takeoff(20)
+    await _feed(tracker, seq)
+    ld = tracker.launch_detector
+    assert ld._pending[GLD].tow_plane_id == TOW          # pair established
+    assert ld._tow_assignments == {("test", TOW): GLD}
+    n_payloads = len(tracker.redis_writer.event_payloads)
+
+    # DDB reload: the tow plane owner opted out while towing
+    tracker.aircraft_resolver.infos[TOW].tracked = False
+    assert await _feed(tracker, [_flying(TOW, last_t + 3)]) is None
+
+    assert tracker.state_machine.get_flight("test", TOW) is None
+    glider = tracker.state_machine.get_flight("test", GLD)
+    assert glider is not None and glider.status == FlightStatus.FLYING
+    assert ld._pending[GLD].tow_plane_id == "" and ld._pending[GLD].tow_plane_reg == ""
+    assert ld._pending[GLD].tow_max_alt == 0.0
+    assert TOW in ld._pending[GLD].rejected
+    assert ld._tow_assignments == {}
+
+    # The glider's detection runs on without the partner and never
+    # reports the evicted tow plane - in the event, the hash or the flight.
+    from tests.test_launch_detector import pair_climb
+    await _feed(tracker, pair_climb(GLD, last_t + 6, 60))
+    glider = tracker.state_machine.get_flight("test", GLD)
+    assert not ld.is_pending(GLD)                        # resolved
+    assert glider.tow_plane_flarm_id == "" and glider.tow_plane_reg == ""
+    assert glider.launch_type != "aerotow"
+    data = tracker.redis_writer.flights[("test", GLD)]
+    assert data["tow_plane_flarm_id"] == "" and data["tow_plane_reg"] == ""
+    assert not _mentions(_payloads_since(tracker, n_payloads), TOW, "D-ETOW")
+    assert ("test", "launch_type_detected", GLD) in tracker.redis_writer.events
+
+
+async def test_tow_plane_eviction_after_release_blanks_resolved_partner(tracker):
+    tracker.aircraft_resolver.infos[TOW] = _info(TOW, registration="D-ETOW", role="towplane")
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD, registration="D-1234", role="glider")
+    seq, last_t, last_alt, last_east = _tow_pair_takeoff(50)
+    await _feed(tracker, seq)
+    # Separation: tow plane turns away and descends, glider continues
+    await _feed(tracker, [
+        beacon(TOW, last_t + 3, east=last_east + 450, north=200,
+               alt=last_alt - 40, speed=140, vs=-3.0, track=45),
+        beacon(GLD, last_t + 3, east=last_east + 60,
+               alt=last_alt + 2, speed=85, vs=0.5, track=90),
+    ])
+    glider = tracker.state_machine.get_flight("test", GLD)
+    assert glider.launch_type == "aerotow"
+    assert glider.tow_plane_flarm_id == TOW and glider.tow_plane_reg == "D-ETOW"
+    assert tracker.redis_writer.flights[("test", GLD)]["tow_plane_flarm_id"] == TOW
+    n_payloads = len(tracker.redis_writer.event_payloads)
+
+    tracker.aircraft_resolver.infos[TOW].tracked = False
+    await _feed(tracker, [_flying(TOW, last_t + 6)])
+
+    glider = tracker.state_machine.get_flight("test", GLD)
+    assert glider.tow_plane_flarm_id == "" and glider.tow_plane_reg == ""
+    assert glider.launch_type == "aerotow"               # the glider's own data stays
+    assert glider.release_alt_m == last_alt
+    data = tracker.redis_writer.flights[("test", GLD)]
+    assert data["tow_plane_flarm_id"] == "" and data["tow_plane_reg"] == ""
+    assert data["launch_type"] == "aerotow"
+    assert ("test", TOW) not in tracker.redis_writer.flights
+    assert not _mentions(_payloads_since(tracker, n_payloads), TOW, "D-ETOW")
+
+
+# ---------------------------------------------------------------------------
+# flight_status DELETE of an evicted flight: retried in check_timeouts
+# ---------------------------------------------------------------------------
+
+def _real_status_delete(tracker: FlightTracker, monkeypatch, side_effect):
+    """Undo the fixture's mock: real _delete_flight_status, fake DB/sync."""
+    tracker._delete_flight_status = FlightTracker._delete_flight_status.__get__(tracker)
+    monkeypatch.setattr("app.db.connection.get_db", lambda: object())
+    delete = AsyncMock(side_effect=side_effect)
+    tracker._state_sync.delete_flight_status = delete
+    return delete
+
+
+async def test_failed_flight_status_delete_is_retried_in_check_timeouts(tracker, monkeypatch):
+    delete = _real_status_delete(tracker, monkeypatch, [RuntimeError("db down"), None])
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await _feed(tracker, [_flying(GLD, 60)])
+
+    assert delete.await_count == 1
+    assert tracker.state_machine.get_flight("test", GLD) is None   # eviction went on
+    assert tracker._status_delete_retry == {(1, GLD)}
+
+    await tracker.check_timeouts()
+
+    assert delete.await_count == 2
+    assert delete.await_args.args[1:] == (1, GLD)
+    assert tracker._status_delete_retry == set()
+
+    await tracker.check_timeouts()
+    assert delete.await_count == 2                                  # nothing left
+
+
+async def test_flight_status_delete_retry_stays_pending_while_db_is_down(tracker, monkeypatch):
+    delete = _real_status_delete(tracker, monkeypatch, RuntimeError("db down"))
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD))
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await _feed(tracker, [_flying(GLD, 60)])
+    await tracker.check_timeouts()
+    assert delete.await_count == 2
+    assert tracker._status_delete_retry == {(1, GLD)}
+
+
+async def test_flight_status_delete_retry_set_is_bounded(tracker, monkeypatch):
+    from app.tracking.flight_tracker import STATUS_DELETE_RETRY_MAX
+    _real_status_delete(tracker, monkeypatch, RuntimeError("db down"))
+    tracker._status_delete_retry = {(1, f"FULL{i:03d}") for i in range(STATUS_DELETE_RETRY_MAX)}
+    tracker.aircraft_resolver.infos[GLD] = _info(GLD)
+    await _feed(tracker, ground_roll(GLD))
+    tracker.aircraft_resolver.infos[GLD].tracked = False
+    await _feed(tracker, [_flying(GLD, 60)])
+    assert (1, GLD) not in tracker._status_delete_retry
+    assert len(tracker._status_delete_retry) == STATUS_DELETE_RETRY_MAX

@@ -228,6 +228,18 @@ class StateSynchronizer:
             flight.release_alt_m or None,
         )
 
+    async def delete_flight_status(self, db, airfield_id: int, flarm_id: str) -> None:
+        """Delete the flight_status row of one aircraft at one airfield.
+
+        Used when a device must no longer be tracked (DDB ``tracked = N``):
+        the row would otherwise stay in the cold store with its last
+        position until the next upsert, which never comes.
+        """
+        await db.execute(
+            "DELETE FROM flight_status WHERE airfield_id = $1 AND flarm_id = $2",
+            airfield_id, flarm_id,
+        )
+
     async def _write_flight_log(self, db, flight: FlightState,
                                 status: FlightStatus) -> None:
         """Archive a completed flight to the flight_log table."""

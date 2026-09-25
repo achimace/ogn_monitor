@@ -349,6 +349,21 @@ Bei Bedarf: Mehrere APRS-IS Verbindungen (eine pro Region) fuer noch bessere Ska
 
 **Priorisierung:** Mandant-lokal > OGN DDB > FlarmNet > OGN-Stream `reg`-Feld
 
+**DDB-Privacy-Flags (ODbL-Auflage "follow DDB tracking privacy choices"):**
+
+- `TRACKED = N`: Beacons des Geraets werden im Worker (`FlightTracker`)
+  komplett verworfen - kein Flugstatus, kein Redis Hot State, kein Track,
+  kein Event, kein `flight_log`. Das gilt auch, wenn der Mandant die
+  FLARM-ID in `tenant_aircraft` fuehrt (Halter-Entscheidung schlaegt
+  Mandant). Kippt das Flag per DDB-Reload waehrend eines Fluges, wird der
+  Flug aus Hot State, Track-Stream und `flight_status` entfernt.
+- `IDENTIFIED = N`: Geraet wird verfolgt, aber nur mit FLARM-ID angezeigt.
+  Kennzeichen/Wettbewerbskennzeichen aus DDB oder `reg`-Feld werden nicht
+  verwendet. Ausnahme: FLARM-ID in `tenant_aircraft` (eigene Flotte =
+  Einwilligung) -> Mandanten-Kennzeichen.
+- Details: `docs/dev-guides/implement-flight-logic.md`, Abschnitt
+  "OGN-DDB Privacy-Flags".
+
 **In-Memory Cache (Performance-kritisch):**
 
 Bei jedem Beacon wird die FLARM-ID aufgeloest. Das darf **kein DB-Query** sein.

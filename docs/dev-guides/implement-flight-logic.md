@@ -82,8 +82,48 @@ await redis.publish(f"beacon:{airfield_slug}", json.dumps({
 2. Hoehendifferenz < 80m
 3. **Kurs-Abweichung < 20 Grad** (verhindert False Positives bei parallelen Starts!)
 
+## OGN-DDB Privacy-Flags (tracked / identified) - PFLICHT
+
+Die OGN Device Database steht unter ODbL mit der Auflage *"you must follow
+DDB tracking privacy choices"*. `ddb_updater.py` importiert `TRACKED` und
+`IDENTIFIED` (Y/N) nach `aircraft_registry`, `AircraftResolver` liefert sie
+als `AircraftInfo.tracked / .identified`. Durchgesetzt wird das an genau
+einer Stelle: `FlightTracker` (Worker), **vor** jedem Schreibzugriff.
+
+| Flag | Bedeutung | Umsetzung |
+|---|---|---|
+| `tracked = N` | Halter will nicht verfolgt werden | Beacon wird komplett verworfen: kein State, kein Redis Hot State, kein Track-Stream, kein Event, kein `flight_log`. Gilt **auch**, wenn der Mandant die FLARM-ID in `tenant_aircraft` eingetragen hat (`build_cache` erbt `tracked` aus der DDB). Kippt das Flag per DDB-Reload waehrend eines Fluges, wird der Flug beim naechsten Beacon bzw. in `check_timeouts()` entfernt (`_evict_untracked_flight`: Hot State, Track-Stream und `flight_status`-Zeile geloescht, kein `flight_log`). Beim Recovery aus Redis werden solche Eintraege gepurgt statt wiederhergestellt. Verworfene Beacons werden gezaehlt und hoechstens einmal pro FLARM-ID und Stunde auf `debug` geloggt. |
+| `identified = N` | Verfolgen ja, identifizieren nein | Label = nur FLARM-ID. `build_cache` blankt Kennzeichen und Wettbewerbskennzeichen aus der DDB, `update_from_aprs` fuellt sie nie nach (Eintrag existiert im Cache). Modell bleibt (nicht identifizierend, Startart-Erkennung). **Ausnahme:** FLARM-ID in `tenant_aircraft` = eigene Flotte = Einwilligung -> Mandanten-Kennzeichen wird verwendet (`source="tenant"`, `identified=True`). |
+
+Eviction eines Schleppers mitten im Schlepp: der gepaarte Segler verliert
+jede Referenz auf ihn (`LaunchDetector.forget_partner`, `tow_plane_flarm_id`
+/ `tow_plane_reg` werden geblankt und der Hash neu geschrieben), seine
+Startart-Erkennung laeuft ohne Partner weiter. Eine fehlgeschlagene
+`flight_status`-Loeschung wird in `check_timeouts()` nachgeholt (begrenztes
+Retry-Set, best effort).
+
+Bewusst **nicht** bereinigt beim Kippen auf `tracked = N`:
+- Der gemeinsame Stream `positions:{slug}` (alle LFZ eines Platzes) wird
+  nicht gepurgt - er rollt von selbst ueber (MAXLEN) und hat aktuell keinen
+  Konsumenten.
+- Historische `flight_log`-Zeilen frueherer, regulaer archivierter Fluege
+  bleiben bestehen; nur der laufende Flug wird ohne `flight_log` verworfen.
+
+Regeln fuer neue Code-Pfade:
+- Jeder neue Konsument von Beacons/Flugdaten im Worker haengt hinter
+  `FlightTracker._process_beacon_for_airfield` - nie am Parser vorbei.
+- Kennzeichen immer aus `AircraftInfo`/`FlightState.registration` nehmen,
+  nie direkt aus `Beacon.registration` oder `aircraft_registry`.
+- Tests: `app/tests/test_flight_tracker.py` (Drop/Eviction),
+  `app/tests/test_aircraft_resolver.py` (Merge-Regeln).
+
+Zweite ODbL-Auflage: keine Weitergabe von OGN-Daten, die aelter als 24 h
+sind. Deshalb ist `settings.track_retention_s` per Validator auf 86400 s
+begrenzt (`config.py`).
+
 ## Checkliste
 - [ ] feature.md gelesen fuer die relevante Section
+- [ ] DDB-Flags `tracked`/`identified` respektiert (siehe oben) - keine neue Stelle, die Beacons am FlightTracker vorbei verarbeitet
 - [ ] Code lebt in app/tracking/ (nicht in app/api/)
 - [ ] In-Memory State, keine DB-Queries im Hot Path
 - [ ] Redis HSET + PUBLISH nach jedem State Update

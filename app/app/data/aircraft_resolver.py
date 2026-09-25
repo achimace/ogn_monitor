@@ -8,10 +8,24 @@ Data sources (priority order):
 4. APRS beacon 'reg' field (lowest priority)
 
 The cache is loaded at startup and reloaded hourly after DDB sync.
+
+OGN DDB privacy flags (ODbL condition: "you must follow DDB tracking
+privacy choices", see docs/dev-guides/implement-flight-logic.md):
+
+* ``tracked = N``: the device owner opted out of tracking. The flag is
+  passed through as ``AircraftInfo.tracked = False`` and the FlightTracker
+  drops every beacon of that device. It wins over a tenant_aircraft entry.
+* ``identified = N``: the device may be tracked but not identified. The
+  DDB registration / competition sign are blanked at load time, so no
+  consumer can leak them, and ``update_from_aprs`` never fills them in
+  again. The only exception is a tenant_aircraft entry for that FLARM-ID:
+  the operator entered its own fleet, which is explicit consent, so the
+  tenant registration is used (``identified = True``, ``source = tenant``).
 """
 
 import asyncio
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 import structlog
@@ -27,17 +41,82 @@ CACHE_RELOAD_INTERVAL_S = 3600   # 1 hour: full cache reload
 
 @dataclass(slots=True)
 class AircraftInfo:
-    """Resolved aircraft information."""
+    """Resolved aircraft information.
+
+    ``tracked`` / ``identified`` carry the OGN DDB privacy choices (see
+    module docstring). For an unidentified device ``registration`` and
+    ``competition_sign`` are always empty unless ``source == "tenant"``.
+    """
     flarm_id: str
     registration: str
     aircraft_model: str
     competition_sign: str
     aircraft_type: int       # 1=Glider, 2=TowPlane, 3=Helicopter, etc.
     source: str              # "tenant" / "ogn_ddb" / "flarmnet" / "aprs"
-    tracked: bool
-    identified: bool
+    tracked: bool            # False = DDB opt-out, drop all beacons
+    identified: bool         # False = show the FLARM-ID only (no reg / CN)
     # Launch-detection role: towplane / glider / motorglider_sl / powered / ""
     role: str = ""
+
+
+def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping],
+                ) -> dict[str, AircraftInfo]:
+    """Merge aircraft_registry and tenant_aircraft rows into the lookup cache.
+
+    Pure function (no I/O) so the DDB privacy rules can be unit-tested:
+
+    * registry ``tracked``/``identified`` are honoured; a NULL counts as
+      TRUE (the DDB default).
+    * ``identified = FALSE`` blanks registration and competition sign.
+    * a tenant row overrides the registry data (explicit consent for the
+      tenant's own fleet) but inherits ``tracked``: the DDB opt-out wins.
+
+    Args:
+        registry_rows: rows with device_id, registration, aircraft_model,
+            competition_sign, device_type, source, tracked, identified.
+        tenant_rows: rows with flarm_id, registration, aircraft_model,
+            competition_sign, aircraft_type, role.
+
+    Returns:
+        flarm_id (uppercase) -> AircraftInfo.
+    """
+    cache: dict[str, AircraftInfo] = {}
+
+    # 1. Global registry (OGN DDB + FlarmNet)
+    for row in registry_rows:
+        fid = row["device_id"].upper()
+        tracked = row["tracked"] is not False
+        identified = row["identified"] is not False
+        cache[fid] = AircraftInfo(
+            flarm_id=fid,
+            registration=(row["registration"] or "") if identified else "",
+            aircraft_model=row["aircraft_model"] or "",
+            competition_sign=(row["competition_sign"] or "") if identified else "",
+            aircraft_type=_parse_device_type(row["device_type"]),
+            source=row["source"] or "ogn_ddb",
+            tracked=tracked,
+            identified=identified,
+        )
+
+    # 2. Tenant-specific aircraft (override global entries, keep the
+    #    DDB tracked flag: the device owner's opt-out is stronger than the
+    #    operator's fleet list)
+    for row in tenant_rows:
+        fid = row["flarm_id"].upper()
+        prev = cache.get(fid)
+        cache[fid] = AircraftInfo(
+            flarm_id=fid,
+            registration=row["registration"] or "",
+            aircraft_model=row["aircraft_model"] or "",
+            competition_sign=row["competition_sign"] or "",
+            aircraft_type=_parse_aircraft_type_str(row["aircraft_type"]),
+            source="tenant",
+            tracked=prev.tracked if prev is not None else True,
+            identified=True,
+            role=role_from_row(row["role"], row["aircraft_type"]),
+        )
+
+    return cache
 
 
 class AircraftResolver:
@@ -75,7 +154,10 @@ class AircraftResolver:
     def update_from_aprs(self, flarm_id: str, registration: str) -> None:
         """Update cache with registration from APRS beacon (lowest priority).
 
-        Only adds if not already known from a better source.
+        Only adds if not already known from a better source. A DDB entry
+        with ``identified = N`` is such a source (with blank registration):
+        it stays as it is, so the APRS ``reg`` field can never re-identify
+        a device whose owner opted out of identification.
         """
         if flarm_id in self._cache:
             return
@@ -103,46 +185,18 @@ class AircraftResolver:
         Loads global aircraft_registry first, then tenant overrides.
         """
         db = get_db()
-        cache: dict[str, AircraftInfo] = {}
 
-        # 1. Global registry (OGN DDB + FlarmNet)
-        rows = await db.fetch(
+        registry_rows = await db.fetch(
             "SELECT device_id, registration, aircraft_model, "
             "competition_sign, device_type, source, tracked, identified "
             "FROM aircraft_registry"
         )
-        for row in rows:
-            fid = row["device_id"].upper()
-            cache[fid] = AircraftInfo(
-                flarm_id=fid,
-                registration=row["registration"] or "",
-                aircraft_model=row["aircraft_model"] or "",
-                competition_sign=row["competition_sign"] or "",
-                aircraft_type=_parse_device_type(row["device_type"]),
-                source=row["source"] or "ogn_ddb",
-                tracked=row["tracked"],
-                identified=row["identified"],
-            )
-
-        # 2. Tenant-specific aircraft (override global entries)
-        rows = await db.fetch(
+        tenant_rows = await db.fetch(
             "SELECT flarm_id, registration, aircraft_model, "
             "competition_sign, aircraft_type, role "
             "FROM tenant_aircraft WHERE is_active = TRUE"
         )
-        for row in rows:
-            fid = row["flarm_id"].upper()
-            cache[fid] = AircraftInfo(
-                flarm_id=fid,
-                registration=row["registration"] or "",
-                aircraft_model=row["aircraft_model"] or "",
-                competition_sign=row["competition_sign"] or "",
-                aircraft_type=_parse_aircraft_type_str(row["aircraft_type"]),
-                source="tenant",
-                tracked=True,
-                identified=True,
-                role=role_from_row(row["role"], row["aircraft_type"]),
-            )
+        cache = build_cache(registry_rows, tenant_rows)
 
         self._cache = cache
         self._negative_cache.clear()
@@ -153,6 +207,8 @@ class AircraftResolver:
             total=len(cache),
             global_entries=sum(1 for v in cache.values() if v.source != "tenant"),
             tenant_entries=sum(1 for v in cache.values() if v.source == "tenant"),
+            untracked=sum(1 for v in cache.values() if not v.tracked),
+            unidentified=sum(1 for v in cache.values() if not v.identified),
         )
 
     async def periodic_reload(self, shutdown_event: asyncio.Event) -> None:

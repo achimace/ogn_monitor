@@ -324,3 +324,22 @@ async def test_completed_and_review_sessions_are_left_alone(w: World):
     s.state = SessionState.REVIEW
     await w.sessions.save(s)
     assert await w.coord.process(s, w.tenant, "retry_hourly") is None
+
+
+async def test_session_without_registration_goes_to_review_instead_of_retrying(w: World):
+    """identified = N device (or unknown to DDB/APRS): no registration will
+    ever arrive, so the session must not be polled against VF every cycle."""
+    w.vf.add_flight(callsign="D-1234")
+    await w.event("takeoff", registration="")
+    s = (await _all_sessions(w))[0]
+    assert s.registration is None
+    assert s.state == SessionState.REVIEW
+    assert s.review_reasons() == ["no_registration"]
+    assert s.matched_flid is None and w.vf.edits == []
+
+    # not part of any retry run any more ...
+    assert await w.sessions.list_open(airfield_id=AF, states={SessionState.AWAITING_MATCH}) == []
+    # ... and even an explicit process() leaves it alone
+    w.now += timedelta(minutes=6)
+    assert await w.coord.process(s, w.tenant, "retry_airborne") is None
+    assert sum(1 for _, p, _ in w.vf.requests if "list/today" in p) == 1

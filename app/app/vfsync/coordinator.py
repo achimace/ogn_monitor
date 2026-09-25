@@ -39,6 +39,10 @@ DEFAULT_LIST_CACHE_S = 300
 # states the worker never touches again
 FINAL_STATES = frozenset({SessionState.COMPLETED, SessionState.EXPIRED, SessionState.REVIEW})
 
+# Match reasons no retry can ever change: the session goes to REVIEW
+# instead of being re-evaluated against VF every retry cycle.
+TERMINAL_MATCH_REASONS = frozenset({"no_registration"})
+
 FlightRowFetcher = Callable[[UUID, str, datetime], Awaitable[list[dict[str, Any]]]]
 
 HANDLED_EVENTS = frozenset({
@@ -361,6 +365,12 @@ class SyncCoordinator:
             session.matched_flid = decision.flid
             if session.state in (SessionState.TRACKING, SessionState.AWAITING_MATCH):
                 session.state = SessionState.MATCHED
+        elif decision.reason in TERMINAL_MATCH_REASONS:
+            # No registration (DDB identified = N, or a device unknown to
+            # DDB and APRS): nothing to match on, ever - hand the session
+            # to a human instead of polling VF until it expires.
+            session.add_review_reason(decision.reason)
+            session.state = SessionState.REVIEW
         else:
             # awaiting_match, ambiguous, starttype_conflict: nothing was
             # written, so keep retrying - the pilot may complete the second
