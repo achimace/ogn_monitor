@@ -6,8 +6,8 @@
  * - Color coding: blue=flying, green=landed, red=alarm, orange=outlanding
  * - Home airfield marker with 800m radius circle
  * - QDR line from home to each aircraft (dashed, with degree label)
- * - Focus on one aircraft (split view): center + zoom, follow while it moves
- * - 24 h flight track of the focused aircraft (stored points + live beacons)
+ * - Focus on one aircraft (row click or marker click): center + zoom, follow while it moves
+ * - Flight track of the focused aircraft since its last takeoff (stored points + live beacons)
  * - Alarm: pulsing red circle at last position
  * - Auto-zoom to fit all active flights
  */
@@ -24,10 +24,12 @@ interface MapViewProps {
   airfieldName?: string
   /** Needed to load the stored track of the focused aircraft. */
   airfieldSlug?: string
-  /** FLARM ID of the aircraft to center on and follow (split view). */
+  /** FLARM ID of the aircraft to center on and follow. */
   focusFlarmId?: string | null
   /** Called when the user leaves focus mode via "Zurück zur Übersicht". */
   onClearFocus?: () => void
+  /** Called when the user clicks an aircraft marker on the map. */
+  onFocus?: (flarmId: string) => void
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -46,8 +48,19 @@ const STATUS_COLORS: Record<string, string> = {
 
 /** Minimum zoom when focusing an aircraft. */
 const FOCUS_ZOOM = 13
-/** Hours of stored track to load for the focused aircraft. */
+/**
+ * Maximum hours of stored track to load for the focused aircraft; also the
+ * fallback window when the takeoff time is unknown (backend limit is 24 h).
+ */
 const TRACK_HOURS = 24
+/** Smallest look-back window the backend accepts. */
+const TRACK_MIN_HOURS = 0.1
+/**
+ * Margin before the takeoff time that is still part of the track, so the
+ * ground roll is drawn (the takeoff is detected a few seconds after the
+ * aircraft started moving).
+ */
+const TRACK_TAKEOFF_MARGIN_MS = 5 * 60 * 1000
 /** Consecutive track points further apart than this start a new line segment. */
 const TRACK_GAP_MS = 10 * 60 * 1000
 /**
@@ -110,11 +123,12 @@ function applyAirspaceVisibility(map: maplibregl.Map, on: boolean) {
 
 type TrackInfo =
   | { state: 'loading' }
-  | { state: 'loaded'; count: number; hours: number }
+  /** `takeoffMs` is set when the track starts at the flight's takeoff, else `hours` applies. */
+  | { state: 'loaded'; count: number; hours: number; takeoffMs: number | null }
   | { state: 'error' }
 
 export default function MapView({
-  flights, airfieldLat, airfieldLng, airfieldName, airfieldSlug, focusFlarmId, onClearFocus,
+  flights, airfieldLat, airfieldLng, airfieldName, airfieldSlug, focusFlarmId, onClearFocus, onFocus,
 }: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
@@ -132,6 +146,16 @@ export default function MapView({
   // re-run on every beacon update.
   const flightsRef = useRef<Flight[]>(flights)
   flightsRef.current = flights
+  // Latest onFocus callback for the marker click listeners. The listener is
+  // attached once per marker at creation; going through the ref means beacon
+  // updates never have to re-bind it and a changed callback is still honoured.
+  const onFocusRef = useRef(onFocus)
+  onFocusRef.current = onFocus
+  // Takeoff time of the focused flight as a primitive dependency: the focus
+  // effect must refetch when a new flight of the same aircraft starts (new
+  // takeoff time after a restart) but not on every beacon.
+  const focusedFlight = focusFlarmId ? flights.find((f) => f.flarmId === focusFlarmId) : undefined
+  const focusTakeoffIso = focusedFlight?.takeoffTime ?? ''
   // In-memory track of the focused aircraft: stored points from the API plus
   // live positions appended from the flights prop.
   const trackPointsRef = useRef<TrackPoint[]>([])
@@ -292,7 +316,8 @@ export default function MapView({
     move()
   }
 
-  // Focus changed: fly to the aircraft, load its stored 24 h track.
+  // Focus changed (aircraft or its takeoff time): fly to the aircraft, load
+  // its stored track from the last takeoff up to now.
   useEffect(() => {
     if (!mapReady || !mapRef.current) return
     const map = mapRef.current
@@ -328,11 +353,24 @@ export default function MapView({
     trackAbortRef.current = controller
     setTrackInfo({ state: 'loading' })
 
-    fetchTrack(airfieldSlug, focusFlarmId, TRACK_HOURS, controller.signal)
+    // Window: from the takeoff (minus the ground-roll margin) up to now; the
+    // full 24 h only when the takeoff time is unknown or unparseable.
+    const takeoffMs = parseTakeoff(focusTakeoffIso)
+    const hours = trackWindowHours(takeoffMs)
+
+    fetchTrack(airfieldSlug, focusFlarmId, hours, controller.signal)
       .then((track) => {
         if (controller.signal.aborted) return
+        // The window is rounded up, so an earlier flight of the same aircraft
+        // may still be inside it – cut everything before this takeoff. The gap
+        // splitting in trackToGeoJson remains as a safety net.
+        const stored = takeoffMs === null
+          ? track.points
+          : track.points.filter((p) => {
+            const t = Date.parse(p.t)
+            return !isFinite(t) || t >= takeoffMs - TRACK_TAKEOFF_MARGIN_MS
+          })
         // Merge: stored points first, then live points newer than the last stored one.
-        const stored = track.points
         const lastStored = stored.length > 0 ? stored[stored.length - 1] : undefined
         const lastStoredT = lastStored ? Date.parse(lastStored.t) : -Infinity
         const live = pendingLiveRef.current.filter((p) => Date.parse(p.t) > lastStoredT)
@@ -341,7 +379,12 @@ export default function MapView({
         trackLoadedRef.current = true
         const current = flightsRef.current.find((f) => f.flarmId === focusFlarmId)
         setTrackSource(map, trackPointsRef.current, trackColor(current))
-        setTrackInfo({ state: 'loaded', count: stored.length, hours: trackHoursLabel(track.since) })
+        setTrackInfo({
+          state: 'loaded',
+          count: stored.length,
+          hours: trackHoursLabel(track.since),
+          takeoffMs,
+        })
         // No live position (e.g. archived flight of today): show the stored
         // track instead, otherwise the focus would change nothing visible.
         const hasLivePos = !!(current && current.latitude && current.longitude)
@@ -371,7 +414,7 @@ export default function MapView({
     return () => {
       controller.abort()
     }
-  }, [focusFlarmId, mapReady, airfieldSlug])
+  }, [focusFlarmId, focusTakeoffIso, mapReady, airfieldSlug])
 
   // Update aircraft markers
   useEffect(() => {
@@ -400,6 +443,18 @@ export default function MapView({
       } else {
         // Create new marker
         const el = createMarkerElement(flight.trackDeg, color, label, isAlarm, isFocused)
+        // Click focuses the aircraft (same as a row click in the table). The
+        // FLARM id is fixed per marker; the callback is read from the ref so
+        // this listener never needs re-binding. stopPropagation keeps the
+        // click away from the map's own handlers.
+        const flarmId = flight.flarmId
+        el.style.cursor = 'pointer'
+        el.addEventListener('click', (e) => {
+          e.stopPropagation()
+          const f = flightsRef.current.find((x) => x.flarmId === flarmId)
+          if (!f || !f.latitude || !f.longitude) return
+          onFocusRef.current?.(flarmId)
+        })
         marker = new maplibregl.Marker({ element: el, anchor: 'center' })
           .setLngLat([flight.longitude, flight.latitude])
           .addTo(map)
@@ -537,7 +592,9 @@ export default function MapView({
               text-xs rounded-md px-2 py-1 shadow backdrop-blur">
               {trackInfo.state === 'loading' && 'Spur wird geladen …'}
               {trackInfo.state === 'loaded' && (trackInfo.count > 0
-                ? `Spur: letzte ${trackInfo.hours} h · ${trackInfo.count} Punkte`
+                ? (trackInfo.takeoffMs !== null
+                  ? `Spur seit Start ${formatUtcHm(trackInfo.takeoffMs)} UTC · ${trackInfo.count} Punkte`
+                  : `Spur: letzte ${trackInfo.hours} h · ${trackInfo.count} Punkte`)
                 : 'keine Spur gespeichert')}
               {trackInfo.state === 'error' && 'Spur nicht verfügbar'}
             </div>
@@ -550,6 +607,35 @@ export default function MapView({
 
 function trackColor(flight: Flight | undefined): string {
   return (flight && STATUS_COLORS[flight.status]) || TRACK_FALLBACK_COLOR
+}
+
+/** Takeoff time in epoch ms, or null when missing/unparseable. */
+function parseTakeoff(iso: string): number | null {
+  if (!iso) return null
+  const t = Date.parse(iso)
+  return isFinite(t) ? t : null
+}
+
+/**
+ * Look-back window in hours for the track request: from the takeoff (plus the
+ * ground-roll margin) up to now, clamped to the backend's limits. Without a
+ * takeoff time the full TRACK_HOURS are requested.
+ */
+function trackWindowHours(takeoffMs: number | null): number {
+  if (takeoffMs === null) return TRACK_HOURS
+  const hours = (Date.now() - takeoffMs + TRACK_TAKEOFF_MARGIN_MS) / (60 * 60 * 1000)
+  const clamped = Math.min(TRACK_HOURS, Math.max(TRACK_MIN_HOURS, hours))
+  // Three decimals are enough (≈4 s) and keep the query string short.
+  return Math.round(clamped * 1000) / 1000
+}
+
+/** "HH:MM" in UTC for the track legend. */
+function formatUtcHm(ms: number): string {
+  return new Date(ms).toLocaleTimeString('de-DE', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  })
 }
 
 /**

@@ -32,7 +32,8 @@ export default function MonitorPage() {
   const [clock, setClock] = useState(utcNow())
   const [view, setView] = useState<ViewMode>('table')
   const [selectedFlight, setSelectedFlight] = useState<Flight | null>(null)
-  // Split view: aircraft the map is centered on (row click). null = overview.
+  // Map/split view: aircraft the map is centered on (row click in split view,
+  // marker click in both). null = overview.
   const [focusFlarmId, setFocusFlarmId] = useState<string | null>(null)
 
   // Set slug and connect WebSocket
@@ -53,7 +54,7 @@ export default function MonitorPage() {
 
   function switchView(mode: ViewMode) {
     setView(mode)
-    // A focus only makes sense in split view; drop it when the layout changes.
+    // The map is re-mounted on a layout change; start it in overview mode.
     setFocusFlarmId(null)
   }
 
@@ -116,7 +117,14 @@ export default function MonitorPage() {
 
         {view === 'map' && (
           <div className="flex-1 min-h-0 px-4 pb-12">
-            <MapView flights={allFlights} />
+            {/* Marker click focuses the aircraft and shows its track. */}
+            <MapView
+              flights={allFlights}
+              airfieldSlug={slug}
+              focusFlarmId={focusFlarmId}
+              onFocus={setFocusFlarmId}
+              onClearFocus={() => setFocusFlarmId(null)}
+            />
           </div>
         )}
 
@@ -137,6 +145,7 @@ export default function MonitorPage() {
                 flights={allFlights}
                 airfieldSlug={slug}
                 focusFlarmId={focusFlarmId}
+                onFocus={setFocusFlarmId}
                 onClearFocus={() => setFocusFlarmId(null)}
               />
             </div>
