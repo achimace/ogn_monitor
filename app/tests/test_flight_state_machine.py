@@ -459,3 +459,113 @@ def test_no_signal_lost_shortly_after_beacon(sim: Sim):
     sim.timeouts()
     assert flight.status == FlightStatus.FLYING
     assert flight.elapsed_s < 5
+
+
+# ---------------------------------------------------------------------------
+# Terrain AGL (terrain_m) vs airfield elevation
+# ---------------------------------------------------------------------------
+
+def _feed_terrain(sim: Sim, b, terrain_m):
+    """Sim.feed equivalent that passes terrain_m to the state machine."""
+    return sim.sm.process_beacon(b, sim.config, terrain_m=terrain_m)
+
+
+def test_terrain_agl_is_altitude_minus_terrain(sim: Sim):
+    _airborne_flight(sim)
+    # Over a 1500 m ridge, 3 km out
+    flight = _feed_terrain(
+        sim, beacon(GLD, 700, east=3000, alt=1700.0, speed=95), terrain_m=1500.0
+    )
+    assert flight.altitude_agl == 200.0
+    assert flight.altitude_m == 1700.0
+
+
+def test_terrain_none_falls_back_to_airfield_elevation(sim: Sim):
+    _airborne_flight(sim)
+    flight = _feed_terrain(
+        sim, beacon(GLD, 700, east=3000, alt=1700.0, speed=95), terrain_m=None
+    )
+    assert flight.altitude_agl == 1700.0 - AF_ELEV
+
+
+def test_outlanding_uses_terrain_agl(sim: Sim):
+    """Slow and 100 m above a 1200 m plateau: outlanding suspicion even though
+    the aircraft is 640 m above the airfield elevation."""
+    _airborne_flight(sim)
+    alt = 1300.0
+    for i in range(6):
+        flight = _feed_terrain(
+            sim, beacon(GLD, 700 + i * 3, east=4000 + i * 20, alt=alt, speed=30),
+            terrain_m=1200.0,
+        )
+    assert flight.status == FlightStatus.OUTLANDING_PENDING
+
+    # Without terrain the same beacons look like a high, slow thermal
+    sim2 = Sim()
+    _airborne_flight(sim2)
+    for i in range(6):
+        flight2 = sim2.feed(beacon(GLD, 700 + i * 3, east=4000 + i * 20, alt=alt, speed=30))
+    assert flight2.status == FlightStatus.FLYING
+
+
+def test_outlanding_recovery_uses_terrain_agl(sim: Sim):
+    _airborne_flight(sim)
+    for i in range(6):
+        _feed_terrain(sim, beacon(GLD, 700 + i * 3, east=4000, alt=1300.0, speed=30),
+                      terrain_m=1200.0)
+    assert sim.flight(GLD).status == FlightStatus.OUTLANDING_PENDING
+    # Climbs to 300 m over terrain (still slow): recovered
+    flight = _feed_terrain(sim, beacon(GLD, 720, east=4000, alt=1500.0, speed=30),
+                           terrain_m=1200.0)
+    assert flight.status == FlightStatus.FLYING
+
+
+def test_landing_band_and_ground_roll_stay_airfield_based(sim: Sim):
+    """A DSM cell 25 m above the runway (trees/hangar) must not break the
+    landing detection: the near-ground band is airfield-relative."""
+    _airborne_flight(sim)
+    flight = None
+    for b in approach_and_land(GLD, 600):
+        flight = _feed_terrain(sim, b, terrain_m=AF_ELEV + 25.0) or flight
+    assert flight.status == FlightStatus.LANDING
+    assert flight.landing_method == "observed"
+    # Reported AGL is terrain based (below the DSM cell)
+    assert flight.altitude_agl == -25.0
+    # Touch & go confidence bookkeeping is runway based, not -25
+    assert flight._ground_min_agl == 0.0
+
+
+def test_takeoff_ground_contact_uses_airfield_elevation(sim: Sim):
+    """Ground contact / lift-off at home: airfield elevation, even with a
+    (noisy) terrain value 40 m above the runway."""
+    flight = None
+    for b in ground_roll(GLD):
+        flight = _feed_terrain(sim, b, terrain_m=AF_ELEV + 40.0) or flight
+    assert flight is not None
+    assert flight.status == FlightStatus.TAKEOFF
+
+
+def test_silence_candidate_uses_airfield_elevation(sim: Sim):
+    """Final approach at 20 m over the runway counts as a silence-landing
+    candidate even if the DSM under the threshold shows a 50 m tree line."""
+    _airborne_flight(sim)
+    flight = _feed_terrain(
+        sim, beacon(GLD, 700, east=300, alt=AF_ELEV + 20, speed=70, vs=-1.0),
+        terrain_m=AF_ELEV + 50.0,
+    )
+    assert flight._silence_candidate_ts > 0
+
+
+def test_silence_phantom_retraction_uses_terrain_agl(sim: Sim):
+    """Re-appearing 100 m above a 1200 m ridge is 'clearly airborne'."""
+    _final_approach_then_silence(sim, silent_for_s=200)
+    sim.timeouts()
+    assert sim.flight(GLD).landing_method == "silence"
+
+    flight = _feed_terrain(
+        sim, beacon(GLD, 800, east=5000, alt=1300.0, speed=95, vs=0.5),
+        terrain_m=1200.0,
+    )
+    assert flight.status == FlightStatus.FLYING
+    assert flight.landing_time == ""
+    assert flight.altitude_agl == 100.0

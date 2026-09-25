@@ -79,6 +79,43 @@ class Settings(BaseSettings):
             )
         return value
 
+    # Terrain model (Copernicus GLO-90 DEM in elevation_tiles, migration 009).
+    # Height above ground of a flight (altitude_agl, outlanding detection)
+    # is computed against the terrain under the aircraft instead of the
+    # airfield elevation. Kill switch: False = airfield elevation everywhere
+    # (legacy behaviour). Decisions tied to the home runway (takeoff,
+    # landing band, touch & go) always use the airfield elevation.
+    terrain_agl_enabled: bool = True
+    # Cache warm-up around every active airfield at worker start / config
+    # reload: radius and grid step (metres). The step should not exceed the
+    # ~100 m cache cell, otherwise every second cell still misses.
+    # 10 km @ 100 m ~ 31k cells per airfield.
+    terrain_warm_radius_km: int = 10
+    terrain_warm_step_m: int = 100
+    # Warm-up query batch size (points per SQL statement) and the timeout
+    # per batch. A timeout/error aborts the current warm-up (retried at the
+    # next config reload) but never pauses the per-beacon lookups.
+    terrain_warm_batch: int = 1000
+    terrain_warm_timeout_s: float = 20
+    # Per-beacon lookup (cache miss) timeout; on timeout the beacon uses the
+    # airfield elevation and lookups pause for terrain_db_backoff_s.
+    terrain_lookup_timeout_s: float = 1.5
+    # Upper bound of the in-memory elevation cache (~100 m cells); when
+    # full, the oldest half is dropped. Sizing: one airfield warm-up needs
+    # about pi * (radius_m / step_m)^2 cells, i.e. 10 km @ 100 m ~ 31k grid
+    # points ~ 28k distinct cache cells (100 m steps partly collapse into
+    # the 111 m latitude cells). 250k thus holds ~8 airfields plus the
+    # per-beacon misses; raise it when more airfields are active or
+    # terrain_warm_radius_km grows, otherwise the warm-up of the last
+    # airfields evicts the first ones.
+    terrain_cache_max_entries: int = 250_000
+    # After a DB error the lookup falls back to the airfield elevation for
+    # this long before trying the database again (no error storm per beacon).
+    terrain_db_backoff_s: int = 60
+    # Import tool: tile source and default radius around each airfield
+    terrain_dem_base_url: str = "https://copernicus-dem-90m.s3.amazonaws.com"
+    terrain_import_radius_km: int = 60
+
     # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
     vfsync_enabled: bool = False
     vfsync_cred_key: str = ""            # Fernet key (base64) for vf_sync_config credentials

@@ -607,3 +607,99 @@ async def test_flight_status_delete_retry_set_is_bounded(tracker, monkeypatch):
     await _feed(tracker, [_flying(GLD, 60)])
     assert (1, GLD) not in tracker._status_delete_retry
     assert len(tracker._status_delete_retry) == STATUS_DELETE_RETRY_MAX
+
+
+# ---------------------------------------------------------------------------
+# Terrain AGL: ElevationService wiring
+# ---------------------------------------------------------------------------
+
+class FakeElevation:
+    """ElevationService stand-in returning a fixed value and counting calls."""
+
+    def __init__(self, value):
+        self.value = value
+        self.calls: list[tuple[float, float]] = []
+
+    async def get(self, lat, lon):
+        self.calls.append((lat, lon))
+        return self.value
+
+
+async def test_terrain_elevation_is_passed_to_state_machine(tracker):
+    tracker.elevation = FakeElevation(1500.0)
+    await _feed(tracker, ground_roll(GLD))
+    flight = await _feed(tracker, [beacon(GLD, 100, east=3000, alt=1700.0, speed=95)])
+
+    assert flight.altitude_agl == 200.0
+    data = tracker.redis_writer.flights[("test", GLD)]
+    assert data["altitude_agl"] == "200"
+
+
+async def test_terrain_lookup_only_for_tracked_flights(tracker):
+    elev = FakeElevation(1500.0)
+    tracker.elevation = elev
+
+    # Ground contact + lift-off: the aircraft is not tracked yet -> no lookup
+    flight = await _feed(tracker, ground_roll(GLD))
+    assert flight.status == FlightStatus.TAKEOFF
+    assert elev.calls == []
+    # Overflight of an unknown aircraft: no lookup either
+    await _feed(tracker, [beacon("OTHER1", 50, east=2000, alt=AF_ELEV + 500, speed=100)])
+    assert elev.calls == []
+
+    # Next beacon of the tracked flight resolves the terrain
+    b = beacon(GLD, 100, east=3000, alt=1700.0, speed=95)
+    await _feed(tracker, [b])
+    assert elev.calls == [(b.lat, b.lon)]
+
+
+async def test_terrain_none_falls_back_to_airfield_elevation(tracker):
+    tracker.elevation = FakeElevation(None)
+    await _feed(tracker, ground_roll(GLD))
+    flight = await _feed(tracker, [beacon(GLD, 100, east=3000, alt=1700.0, speed=95)])
+    assert flight.altitude_agl == 1700.0 - AF_ELEV
+
+
+async def test_terrain_kill_switch_skips_lookup(tracker, monkeypatch):
+    monkeypatch.setattr(settings, "terrain_agl_enabled", False)
+    elev = FakeElevation(1500.0)
+    tracker.elevation = elev
+    await _feed(tracker, ground_roll(GLD))
+    flight = await _feed(tracker, [beacon(GLD, 100, east=3000, alt=1700.0, speed=95)])
+    assert elev.calls == []
+    assert flight.altitude_agl == 1700.0 - AF_ELEV
+
+
+async def test_no_elevation_service_uses_airfield_elevation(tracker):
+    assert tracker.elevation is None
+    await _feed(tracker, ground_roll(GLD))
+    flight = await _feed(tracker, [beacon(GLD, 100, east=3000, alt=1700.0, speed=95)])
+    assert flight.altitude_agl == 1700.0 - AF_ELEV
+
+
+async def test_classify_flight_end_uses_terrain_at_last_position(tracker):
+    """Slow at 100 m over a 1200 m plateau, then silence: OUTLANDED with the
+    terrain model; against the airfield elevation (640 m "AGL") the same
+    profile is unclassifiable."""
+    import time as _time
+
+    tracker.elevation = FakeElevation(1200.0)
+    await _feed(tracker, ground_roll(GLD))
+    flight = await _feed(tracker, [beacon(GLD, 100, east=6000, alt=1300.0, speed=70)])
+    assert flight.status == FlightStatus.FLYING
+
+    # The profile buffer prunes by wallclock, so fill it with recent points:
+    # level, constant speed (no "controlled descent"), stable course.
+    now = _time.time()
+    for i in range(12):
+        tracker.profile_buffer.add(
+            GLD, now - 120 + i * 10, flight.latitude, flight.longitude,
+            1300.0, 70.0, -1.0, 90.0,
+        )
+
+    result = await tracker.classify_flight_end(flight, tracker._configs["test"])
+    assert result.scenario == "OUTLANDED"
+
+    tracker.elevation = FakeElevation(None)
+    result_af = await tracker.classify_flight_end(flight, tracker._configs["test"])
+    assert result_af.scenario == "UNKNOWN"

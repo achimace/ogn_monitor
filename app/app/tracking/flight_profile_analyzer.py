@@ -54,7 +54,12 @@ def analyze_profile(
 
     Args:
         beacons: Profile buffer points (last ~10 min).
-        ground_elevation_m: Estimated ground level at last position.
+        ground_elevation_m: Ground level (m MSL) at the *last position* -
+            the terrain model value when available
+            (``FlightTracker.classify_flight_end`` resolves it via
+            ``ElevationService``), the airfield elevation as fallback.
+            Over mountains the airfield elevation is off by hundreds of
+            metres and would hide an outlanding.
         nearest_airport_name: Name of nearest airport (if any within range).
         nearest_airport_dist_m: Distance to nearest airport in meters.
         nearest_airport_elevation_m: Elevation of nearest airport.

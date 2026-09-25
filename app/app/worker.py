@@ -142,6 +142,7 @@ async def main():
         from app.aprs.filter_builder import AirfieldPosition, build_filters
         from app.data.aircraft_resolver import AircraftResolver
         from app.data.ddb_updater import scheduled_sync, sync_ddb
+        from app.tracking.elevation import ElevationService
         from app.tracking.flight_tracker import FlightTracker
         from app.tracking.redis_writer import RedisWriter
         from app.tracking.state_synchronizer import StateSynchronizer
@@ -149,8 +150,13 @@ async def main():
         # Initialize components
         redis_writer = RedisWriter(redis)
         aircraft_resolver = AircraftResolver()
-        flight_tracker = FlightTracker(redis_writer, aircraft_resolver)
+        # Terrain model (elevation_tiles) for AGL; falls back to the
+        # airfield elevation while the cache is cold or no tile exists.
+        elevation = ElevationService(get_db())
+        flight_tracker = FlightTracker(redis_writer, aircraft_resolver, elevation=elevation)
         state_sync = StateSynchronizer()
+        if not settings.terrain_agl_enabled:
+            log.info("terrain_agl_disabled", hint="TERRAIN_AGL_ENABLED=false")
 
         # Load airfield configs
         configs = await load_airfield_configs()
@@ -213,6 +219,27 @@ async def main():
             name="aprs_client",
         ))
 
+        # Terrain cache warm-up around the airfields: background, after the
+        # APRS connect so it never delays the data stream (misses just fall
+        # back to the airfield elevation until it is done).
+        async def warm_terrain(cfgs: dict) -> None:
+            try:
+                await elevation.warm_airfields(cfgs)
+            except Exception:
+                log.exception("terrain_warmup_failed")
+
+        # Fire-and-forget warm-up tasks (start + config reloads) are kept
+        # here so the event loop cannot garbage-collect them mid-run.
+        warmup_tasks: set[asyncio.Task] = set()
+
+        def spawn_warmup(cfgs: dict) -> None:
+            task = asyncio.create_task(warm_terrain(cfgs), name="terrain_warmup")
+            warmup_tasks.add(task)
+            task.add_done_callback(warmup_tasks.discard)
+
+        if settings.terrain_agl_enabled:
+            spawn_warmup(configs)
+
         # Periodic timeout checks + health update (every 30s)
         async def timeout_loop():
             while not shutdown_event.is_set():
@@ -265,6 +292,10 @@ async def main():
                 try:
                     new_configs = await load_airfield_configs()
                     flight_tracker.set_configs(new_configs)
+                    # New / moved airfields get their terrain cache warmed
+                    # (already warmed centres are skipped by the service)
+                    if settings.terrain_agl_enabled:
+                        spawn_warmup(new_configs)
 
                     # Rebuild APRS filters if airfields changed
                     new_filter_airfields = [
@@ -301,10 +332,11 @@ async def main():
         log.info("Shutting down worker tasks...")
         await aprs_client.stop()
 
-        for task in tasks:
+        pending = [*tasks, *warmup_tasks]
+        for task in pending:
             task.cancel()
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*pending, return_exceptions=True)
 
     except Exception:
         log.exception("Worker crashed")

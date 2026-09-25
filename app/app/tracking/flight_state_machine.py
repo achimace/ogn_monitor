@@ -15,6 +15,26 @@ APRS delivery does not distort takeoff/landing times and so that the whole
 machine can be replayed deterministically in tests. Wallclock time is only
 used for "no beacon received for N seconds" style timeouts.
 
+Height above ground - two references
+------------------------------------
+``process_beacon`` receives an optional ``terrain_m`` (ground elevation
+under the aircraft from the terrain model, see ``tracking/elevation.py``)
+and keeps two AGL values:
+
+- ``agl_af`` = altitude - airfield elevation. Used for every decision that
+  is tied to the home runway: ground contact before takeoff, takeoff
+  "too high" guard, silence-landing candidate, restart / touch & go
+  confidence (``_ground_min_agl``). The runway elevation is what matters
+  there, and the DSM cell over the airfield may carry hangar/tree noise.
+  ``is_high`` and the landing band ``near_ground`` are explicitly
+  airfield-relative as well.
+- ``agl`` = altitude - terrain (falls back to ``agl_af`` when the terrain
+  is unknown or the feature is disabled). Used for everything that
+  describes the aircraft relative to the ground *wherever it is*:
+  ``FlightState.altitude_agl`` (display, track stream, flight_log),
+  outlanding detection / recovery and the "clearly airborne anywhere"
+  check that retracts a phantom silence landing.
+
 Configurable per airfield via AirfieldConfig.
 """
 
@@ -107,6 +127,10 @@ class AirfieldConfig:
     ground_max_agl_m: int = 50
     # Altitude band around airfield elevation considered "near ground" (m)
     near_ground_band_m: int = 60
+    # Outlanding suspicion: slow and below this AGL (terrain model when
+    # available) away from home; recovered when climbing above the second.
+    outlanding_max_agl_m: int = 150
+    outlanding_recover_agl_m: int = 250
     # Optional shapely Polygon (lon/lat, EPSG:4326). When set, this defines
     # the "home area" precisely; the circular home_radius_m is then unused.
     # Typed as Any so this module does not hard-import shapely.
@@ -197,10 +221,19 @@ class FlightStateMachine:
         if events:
             self._pending_events = events + self._pending_events
 
-    def process_beacon(self, beacon: Beacon, config: AirfieldConfig) -> FlightState | None:
+    def process_beacon(self, beacon: Beacon, config: AirfieldConfig,
+                       terrain_m: float | None = None) -> FlightState | None:
         """Process a beacon for a specific airfield.
 
         Either updates an existing flight or detects a new takeoff.
+
+        Args:
+            beacon: Parsed APRS beacon.
+            config: Airfield configuration.
+            terrain_m: Ground elevation (m MSL) under the beacon position
+                from the terrain model, or None (unknown / disabled) to
+                use the airfield elevation. See the module docstring for
+                which decisions use which reference.
 
         Returns:
             Updated FlightState, or None if beacon was discarded.
@@ -211,7 +244,9 @@ class FlightStateMachine:
         # Calculate position relative to airfield
         dist_m = haversine(beacon.lat, beacon.lon, config.latitude, config.longitude)
         qdr = azimuth(config.latitude, config.longitude, beacon.lat, beacon.lon)
-        agl = altitude_agl(beacon.altitude, config.elevation_m)
+        # Airfield-relative AGL (runway decisions) vs terrain AGL (generic)
+        agl_af = altitude_agl(beacon.altitude, config.elevation_m)
+        agl = altitude_agl(beacon.altitude, terrain_m) if terrain_m is not None else agl_af
         # "At home" check: prefer polygon (precise) when configured, else
         # fall back to circular radius around the airfield centre.
         if config.home_polygon is not None:
@@ -225,7 +260,7 @@ class FlightStateMachine:
         ts = beacon.timestamp
 
         is_high = beacon.altitude > config.elevation_m + config.takeoff_alt_offset_m
-        is_too_high = agl > config.takeoff_max_agl_m
+        is_too_high = agl_af > config.takeoff_max_agl_m
 
         if flight is not None and flight._last_beacon_ts:
             # A beacon stamped in the future (receiver clock ahead) must not
@@ -264,7 +299,7 @@ class FlightStateMachine:
             # the rolling buffer is only used for the takeoff trigger so a
             # single GPS speed glitch cannot fire takeoff prematurely.
             is_on_ground = (beacon.speed < config.ground_speed_max_kmh
-                            and agl < config.ground_max_agl_m)
+                            and agl_af < config.ground_max_agl_m)
             if is_on_ground:
                 entry = gc.get(beacon.flarm_id)
                 if entry is None:
@@ -278,7 +313,7 @@ class FlightStateMachine:
                         flarm_id=beacon.flarm_id,
                         airfield=slug,
                         speed=beacon.speed,
-                        agl=round(agl),
+                        agl=round(agl_af),
                     )
                 entry["speeds"].append(beacon.speed)
                 entry["fast_since_ts"] = 0.0
@@ -321,7 +356,7 @@ class FlightStateMachine:
                     airfield=slug,
                     fast_beacons=entry["fast_count"],
                     speed=beacon.speed,
-                    agl=round(agl),
+                    agl=round(agl_af),
                 )
                 return None
 
@@ -358,7 +393,7 @@ class FlightStateMachine:
                     "overflight_ignored",
                     flarm_id=beacon.flarm_id,
                     airfield=slug,
-                    agl=round(agl),
+                    agl=round(agl_af),
                     speed=beacon.speed,
                     reason="not_seen_on_ground",
                 )
@@ -392,6 +427,8 @@ class FlightStateMachine:
                 flight._restart_fast_count, config
             )
 
+            # "Airborne anywhere" -> terrain AGL (a go-around in a radio
+            # hole may re-appear far from the runway)
             clearly_airborne = (agl > config.near_ground_band_m
                                 and beacon.speed >= config.takeoff_speed_kmh)
 
@@ -413,7 +450,7 @@ class FlightStateMachine:
                     airfield=slug,
                     fast_beacons=flight._restart_fast_count,
                     speed=beacon.speed,
-                    agl=round(agl),
+                    agl=round(agl_af),
                 )
                 flight.last_seen = now_iso
                 flight.elapsed_s = 0
@@ -463,7 +500,8 @@ class FlightStateMachine:
                 flight.speed_kmh = beacon.speed
                 flight.last_seen = now_iso
                 flight.elapsed_s = 0
-                flight._ground_min_agl = min(flight._ground_min_agl, agl)
+                # Touch & go confidence is about the runway -> airfield AGL
+                flight._ground_min_agl = min(flight._ground_min_agl, agl_af)
                 flight._ground_min_speed = min(flight._ground_min_speed, beacon.speed)
                 if (not flight.landing_final
                         and ground_elapsed > self._final_delay_s(flight, config)):
@@ -539,14 +577,14 @@ class FlightStateMachine:
         # not look like final resets the candidate (no phantom landings).
         if flight.status in AIRBORNE_STATUSES:
             if (at_home
-                    and agl < config.near_ground_band_m
+                    and agl_af < config.near_ground_band_m
                     and beacon.vs <= SILENCE_MAX_VS_MS
                     and beacon.speed < config.landing_speed_kmh
                     + SILENCE_APPROACH_SPEED_MARGIN_KMH):
                 conf = 0.6
                 if beacon.speed < config.landing_speed_kmh + 10:
                     conf += 0.2
-                if agl < config.near_ground_band_m / 2:
+                if agl_af < config.near_ground_band_m / 2:
                     conf += 0.1
                 if beacon.vs < 0:
                     conf += 0.1
@@ -569,15 +607,15 @@ class FlightStateMachine:
             )
             log.info("signal_recovered", flarm_id=beacon.flarm_id, airfield=slug)
 
-        # Outlanding detection: slow and low, away from home
+        # Outlanding detection: slow and low (terrain AGL), away from home
         if (flight.status in (FlightStatus.FLYING, FlightStatus.TAKEOFF)
-                and not at_home and is_slow and agl < 150):
+                and not at_home and is_slow and agl < config.outlanding_max_agl_m):
             flight.status = FlightStatus.OUTLANDING_PENDING
             flight.outlanding_pending_since = now_mono
 
         # Outlanding recovery: speed picked up again
         if flight.status == FlightStatus.OUTLANDING_PENDING:
-            if not is_slow or agl > 250:
+            if not is_slow or agl > config.outlanding_recover_agl_m:
                 flight.status = FlightStatus.FLYING
                 flight.outlanding_pending_since = 0
 
@@ -830,7 +868,8 @@ class FlightStateMachine:
         flight._slow_since = 0.0
         flight._silence_candidate_ts = 0.0
         flight._silence_candidate_conf = 0.0
-        flight._ground_min_agl = flight.altitude_agl
+        # Runway-relative (touch & go confidence), not terrain AGL
+        flight._ground_min_agl = altitude_agl(flight.altitude_m, config.elevation_m)
         flight._ground_min_speed = flight.speed_kmh
         self._emit_event(slug, "landing", flight.flarm_id, flight, message=message)
 

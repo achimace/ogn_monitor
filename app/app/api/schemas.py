@@ -1,9 +1,11 @@
 """Pydantic v2 models for API request/response validation."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic.alias_generators import to_camel
 import re
 
 
@@ -232,7 +234,9 @@ class TrackPoint(BaseModel):
     lat: float
     lon: float
     alt: int = Field(..., description="Altitude MSL (m)")
-    agl: int = Field(..., description="Altitude above airfield (m)")
+    agl: int = Field(..., description=(
+        "Altitude above ground (m): terrain elevation under the aircraft "
+        "when available, otherwise above the airfield"))
     speed: int = Field(..., description="Ground speed (km/h)")
     vs: float = Field(..., description="Vertical speed (m/s)")
     track: int = Field(..., description="Course (deg)")
@@ -244,3 +248,68 @@ class TrackResponse(BaseModel):
     flarm_id: str = Field(..., serialization_alias="flarmId")
     since: str = Field(..., description="Start of the requested window, ISO 8601 UTC (Z)")
     points: list[TrackPoint]
+
+
+# ---- Tower alarm workflow (acknowledge / annotate) ----
+
+AlarmKind = Literal["alarm", "emergency", "outlanding", "signal_lost", "other"]
+AlarmActionState = Literal["acknowledged", "retrieval_underway", "resolved", "false_alarm"]
+
+ALARM_COMMENT_MAX_LEN = 500
+
+
+class AlarmActionRequest(BaseModel):
+    """POST /api/monitor/{slug}/flights/{flarm_id}/actions body."""
+    state: AlarmActionState
+    comment: str | None = Field(None, max_length=ALARM_COMMENT_MAX_LEN)
+    alarm_kind: AlarmKind | None = Field(
+        None,
+        description="Only used when the flight is not in the hot state; "
+                    "otherwise derived from the flight status.",
+    )
+
+    @field_validator("comment")
+    @classmethod
+    def _strip_comment(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class _CamelModel(BaseModel):
+    """Base for monitor responses: snake_case in Python, camelCase on the wire."""
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class AlarmActionItem(_CamelModel):
+    """One row of flight_alarm_actions."""
+    id: UUID
+    state: AlarmActionState
+    comment: str | None = None
+    alarm_kind: AlarmKind
+    set_by: str
+    created_at: str = Field(..., description="ISO 8601 UTC (Z)")
+    flight_takeoff_ts: str | None = Field(None, description="ISO 8601 UTC (Z)")
+
+
+class AlarmHotState(_CamelModel):
+    """The alarm_* fields mirrored into the Redis flight hash."""
+    alarm_state: AlarmActionState
+    alarm_comment: str = ""
+    alarm_set_by: str = Field(..., description=(
+        "Display label only (tenant name, fallback 'Flugleiter') - the hash "
+        "is public, the user's e-mail stays in the auth-only history"))
+    alarm_set_at: str = Field(..., description="ISO 8601 UTC (Z)")
+
+
+class AlarmActionCreated(_CamelModel):
+    """201 response of POST .../actions."""
+    action: AlarmActionItem
+    alarm_state: AlarmHotState
+
+
+class AlarmActionList(BaseModel):
+    """GET .../actions and GET /api/monitor/{slug}/actions."""
+    items: list[AlarmActionItem]
+    count: int

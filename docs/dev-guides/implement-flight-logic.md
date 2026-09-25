@@ -77,6 +77,32 @@ await redis.publish(f"beacon:{airfield_slug}", json.dumps({
 }))
 ```
 
+## AGL-Quelle: Gelaendemodell vs. Platzhoehe
+
+`FlightTracker` loest fuer Beacons bereits verfolgter Fluege die
+Gelaendehoehe unter dem Flugzeug ueber `tracking/elevation.py`
+(`ElevationService`, Copernicus-GLO-90-Kacheln in `elevation_tiles`,
+Import: `python -m app.tools.import_elevation`) auf und uebergibt sie als
+`terrain_m` an `FlightStateMachine.process_beacon`. Die State Machine fuehrt
+zwei AGL-Werte (Details im Modul-Docstring):
+
+| Referenz | Verwendung |
+|---|---|
+| **Platzhoehe** (`agl_af`, `is_high`, `near_ground`) | alles, was an der Heimat-Piste haengt: Bodenkontakt vor dem Start, `takeoff_max_agl_m`, Landeband, Silence-Landing-Kandidat, Touch-&-Go-Konfidenz (`_ground_min_agl`), `release_alt_agl_m` (Abrechnung) |
+| **Gelaende** (`agl`) | `FlightState.altitude_agl` (Anzeige, Track-Stream, flight_log), Aussenlande-Erkennung (`outlanding_max_agl_m` / `outlanding_recover_agl_m`), "eindeutig airborne" beim Zuruecknehmen einer Phantom-Funkstille-Landung, `analyze_profile(ground_elevation_m=...)` via `FlightTracker.classify_flight_end` |
+
+Regeln:
+- Lookup **vor** dem CPU-gebundenen State-Machine-Aufruf (async, Cache
+  ~100-m-Zellen, DB nur bei Miss, Negativ-Cache fuer Regionen ohne Kacheln).
+  Nur fuer bereits verfolgte Fluege - nie fuer jeden der tausenden Beacons
+  im APRS-Filterradius.
+- Kein Wert (keine Kachel, DB-Fehler, `TERRAIN_AGL_ENABLED=false`) =>
+  `terrain_m=None` => Platzhoehe wie frueher. Kill switch in `config.py`.
+- Copernicus ist ein DSM: ueber Wald ~20-30 m zu hoch. Deshalb bleiben die
+  Pisten-Entscheidungen bei der Platzhoehe.
+- Tests: `app/tests/test_elevation.py`, `test_flight_state_machine.py`
+  (`test_terrain_*`), `test_flight_tracker.py` (`test_terrain_*`).
+
 ## F-Schlepp Paar-Erkennung (3 Kriterien!)
 1. Distanz < 150m (Seil-Laenge)
 2. Hoehendifferenz < 80m

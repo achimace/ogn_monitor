@@ -146,7 +146,8 @@ class RedisWriter:
             ts_ms: Beacon time as Unix epoch milliseconds.
             lat, lon: WGS84 position.
             alt_m: Altitude MSL (m).
-            alt_agl_m: Altitude above the airfield (m).
+            alt_agl_m: Altitude above ground (m): terrain elevation under
+                the aircraft when known, otherwise the airfield elevation.
             speed_kmh: Ground speed (km/h).
             vs_ms: Vertical speed (m/s).
             track_deg: Course (degrees).

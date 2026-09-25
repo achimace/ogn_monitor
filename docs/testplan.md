@@ -120,6 +120,7 @@ Wichtige Optionen: `--type winch|self|powered`, `--touch-go N`,
 | S-05 | http://localhost:8099/ | „Vereinsflieger-Mock“ lädt, Login-Daten im Kopf sichtbar |
 | S-06 | `docker compose logs vfsync --tail 20` | `vfsync_started` mit 6 Tasks; kein `vfsync_cred_key_missing` |
 | S-07 | VF-Sync-Health (Kap. 1.3) | HTTP 200, `"healthy": true` |
+| S-08 | `docker compose run --rm --no-deps api python -m app.tools.import_elevation --check 47.6386 11.2394` | `≈ 676 m` (Geländemodell importiert, DEPLOYMENT.md 9a); Worker-Log zeigt `terrain_cache_warmed` mit `cells_with_data > 0` |
 
 ---
 
@@ -206,6 +207,9 @@ einen Platz mit regelmäßigem Betrieb konfigurieren).
 | T-20 | Außenlandung | Flugzeug landet außerhalb (oder tief/langsam > 5 min entfernt) | AUSSENLANDUNG (orange) mit Position/Entfernung |
 | T-21 | Überflug fremdes Flugzeug | Flugzeug fliegt über den Platz ohne dort gestartet zu sein | Erscheint **nicht** im Monitor |
 | T-22 | Mehrere Browser | Monitor auf 2 Geräten | Beide zeigen dieselben Änderungen ohne Reload |
+| T-23 | Alarm quittieren (eingeloggt) | Bei einem Flug unter ALARM/KEIN SIGNAL/AUSSENLANDUNG „Quittieren“ mit Kommentar („Pilot per Handy erreicht“) | 201; Flug bleibt in seiner Sektion, zeigt Status „quittiert“, Kommentar, Bearbeiter und Zeit (UTC); zweiter Browser sieht es ohne Reload; `GET /api/monitor/<slug>` liefert `alarmState`/`alarmComment`/`alarmSetBy`/`alarmSetAt` |
+| T-24 | Alarm-Verlauf | Nach T-23 weitere Aktionen „Rückholung läuft“ und „Erledigt“; dann `GET /api/monitor/<slug>/flights/<flarmId>/actions` bzw. `…/actions?date=YYYY-MM-DD` und `GET /api/monitor/<slug>/actions` | Liste **neueste zuerst** mit `state`, `comment`, `alarmKind` (aus dem Flugstatus: alarm/emergency/outlanding/signal_lost, sonst other), `setBy`, `createdAt`, `flightTakeoffTs`; anderer Tag → leer; fremder Mandant → 403; ohne Login → 401; Verlauf bleibt auch nach Archivierung/„Ausblenden“ des Flugs erhalten |
+| T-25 | Fehlalarm | Bei einem Alarm „Fehlalarm“ ohne Kommentar setzen | Flug bleibt sichtbar (kein Entfernen), `alarmState = false_alarm`, `alarmComment = ""`; Kommentar > 500 Zeichen oder unbekannter Status → 422; Eintrag im Verlauf (T-24) |
 
 ---
 

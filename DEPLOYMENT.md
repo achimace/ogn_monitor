@@ -254,6 +254,43 @@ Sollte `certbot.timer` zeigen, der 2x taeglich prueft.
 4. **Flugzeuge eintragen**: Kennzeichen + FLARM-IDs der Vereinsflugzeuge
 5. **Tower-Monitor oeffnen**: Echtzeit-Anzeige unter `/monitor/<slug>`
 
+## 9a. Geländemodell (optional, empfohlen)
+
+Der Worker berechnet die Höhe über Grund (`altitude_agl`, Außenlande-
+Erkennung) aus einem Geländemodell statt aus der Platzhöhe – über den Alpen
+liegt die Platzhöhe sonst um hunderte Meter daneben. Quelle: Copernicus
+GLO-90 DEM (öffentlicher S3-Bucket, keine Zugangsdaten, 1°×1°-Kacheln à
+≈5 MB). Die Kacheln liegen in der Tabelle `elevation_tiles` (Migration 009,
+läuft mit `deploy.sh`).
+
+Einmalig nach dem Deploy (und erneut, wenn ein Flugplatz hinzukommt):
+
+```bash
+cd /opt/ogn_monitor
+docker compose run --rm --no-deps api python -m app.tools.import_elevation --all
+# Ohlstadt + Dassu ≈ 4-9 Kacheln (Radius 60 km, --radius-km änderbar)
+
+# Kontrolle: Höhe an einem Punkt (Ohlstadt ≈ 676 m)
+docker compose run --rm --no-deps api python -m app.tools.import_elevation --check 47.6386 11.2394
+```
+
+Der Import muss als **DB-Superuser** laufen (`SET LOCAL
+postgis.gdal_enabled_drivers` ist superuser-only); der Compose-Benutzer
+`POSTGRES_USER` aus `.env` ist einer, ein eigens angelegter Applikations-
+User mit eingeschränkten Rechten wäre es nicht.
+
+Bereits vorhandene Kacheln werden übersprungen (`--force` ersetzt sie),
+Kacheln über See gibt es im Bucket nicht (404, wird geloggt und übersprungen).
+Der Worker wärmt beim Start einen Cache rund um jeden Flugplatz (Log
+`terrain_cache_warmed`); nach dem Import daher `docker compose restart worker`.
+
+Hinweise:
+- Ohne Kacheln (oder mit `TERRAIN_AGL_ENABLED=false` in `.env`) rechnet der
+  Worker wie bisher gegen die Platzhöhe – Start-/Landeerkennung am Platz
+  nutzt ohnehin immer die Platzhöhe.
+- Copernicus ist ein Oberflächenmodell (DSM): über Wald liegt der Wert
+  ≈20-30 m über dem Boden, am Flugplatz stimmt er.
+
 ## 10. Wartung & Monitoring
 
 ### Logs anschauen

@@ -87,6 +87,27 @@ CREATE TRIGGER trg_airfield_geom
     FOR EACH ROW EXECUTE FUNCTION update_airfield_geom();
 
 -- =============================================
+-- ELEVATION TILES (Geländemodell, Migration 009)
+-- =============================================
+-- Copernicus GLO-90 DEM tiles, imported by the operator with
+--   python -m app.tools.import_elevation --all
+-- The worker computes AGL from these (app/tracking/elevation.py) and
+-- falls back to the airfield elevation while no tile covers a position.
+CREATE EXTENSION IF NOT EXISTS postgis_raster;
+
+CREATE TABLE IF NOT EXISTS elevation_tiles (
+    id           BIGSERIAL PRIMARY KEY,
+    source_tile  VARCHAR(64) NOT NULL,        -- e.g. Copernicus_DSM_COG_30_N47_00_E011_00_DEM
+    rast         raster NOT NULL,             -- 64x64 px sub-tile, EPSG:4326
+    imported_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_elevation_tiles_rast
+    ON elevation_tiles USING gist (ST_ConvexHull(rast));
+CREATE INDEX IF NOT EXISTS idx_elevation_tiles_source
+    ON elevation_tiles (source_tile);
+
+-- =============================================
 -- TENANT AIRCRAFT (Vereinsflugzeuge)
 -- =============================================
 CREATE TABLE tenant_aircraft (
@@ -250,6 +271,29 @@ CREATE INDEX idx_flight_log_registration ON flight_log(registration);
 ALTER TABLE flight_log
     ADD CONSTRAINT flight_log_unique_takeoff
     UNIQUE (airfield_id, flarm_id, takeoff_time);
+
+-- =============================================
+-- FLIGHT ALARM ACTIONS (Flugleiter-Workflow: quittieren / kommentieren)
+-- Kept in sync with db/migrations/010_flight_alarm_actions.sql
+-- =============================================
+CREATE TABLE IF NOT EXISTS flight_alarm_actions (
+    id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    airfield_id        UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
+    flarm_id           VARCHAR(16) NOT NULL,
+    flight_takeoff_ts  TIMESTAMPTZ,
+    alarm_kind         VARCHAR(24) NOT NULL,   -- alarm | emergency | outlanding | signal_lost | other
+    state              VARCHAR(24) NOT NULL,   -- acknowledged | retrieval_underway | resolved | false_alarm
+    comment            TEXT,
+    set_by             VARCHAR(255) NOT NULL,  -- user email
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT flight_alarm_actions_kind_check
+        CHECK (alarm_kind IN ('alarm', 'emergency', 'outlanding', 'signal_lost', 'other')),
+    CONSTRAINT flight_alarm_actions_state_check
+        CHECK (state IN ('acknowledged', 'retrieval_underway', 'resolved', 'false_alarm'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_flight_alarm_actions_lookup
+    ON flight_alarm_actions (airfield_id, flarm_id, created_at DESC);
 
 -- =============================================
 -- FLIGHT PROFILE SNAPSHOT (bei Alarm gespeichert)

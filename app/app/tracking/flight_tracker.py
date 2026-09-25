@@ -13,6 +13,13 @@ OGN DDB privacy: this class is the single choke point for the DDB
 ``tracked = N`` opt-out. Beacons of such devices are dropped here, before
 any state machine, hot-state, track-stream, event or flight_log write
 (see docs/dev-guides/implement-flight-logic.md).
+
+Terrain AGL: for beacons of an already tracked flight the ground elevation
+under the aircraft is resolved from ``ElevationService`` (cache, DB on a
+miss) *before* the CPU-bound state machine call and passed in. Beacons of
+untracked aircraft (thousands per minute inside the APRS filter radius)
+never trigger a lookup: a takeoff can only happen at the home airfield,
+where the airfield elevation is the right reference anyway.
 """
 
 import asyncio
@@ -23,6 +30,8 @@ import structlog
 from app.aprs.beacon_parser import Beacon, parse_beacon
 from app.config import settings
 from app.data.aircraft_resolver import AircraftResolver
+from app.tracking.elevation import ElevationService
+from app.tracking.flight_profile_analyzer import FlightEndClassification, analyze_profile
 from app.tracking.flight_profile_buffer import FlightProfileBuffer
 from app.tracking.flight_state import FlightState, FlightStatus
 from app.tracking.flight_state_machine import AirfieldConfig, FlightStateMachine
@@ -51,9 +60,12 @@ class FlightTracker:
         self,
         redis_writer: RedisWriter,
         aircraft_resolver: AircraftResolver,
+        elevation: ElevationService | None = None,
     ):
         self.redis_writer = redis_writer
         self.aircraft_resolver = aircraft_resolver
+        # Terrain model lookup; None = airfield elevation everywhere
+        self.elevation = elevation
         self.state_machine = FlightStateMachine()
         self.launch_detector = LaunchDetector()
         self.profile_buffer = FlightProfileBuffer()
@@ -125,8 +137,14 @@ class FlightTracker:
         existing = self.state_machine.get_flight(slug, beacon.flarm_id)
         old_status = existing.status if existing else None
 
+        # Terrain under the aircraft (async, before the CPU-bound call);
+        # only for tracked flights, see the module docstring.
+        terrain_m = None
+        if existing is not None:
+            terrain_m = await self._terrain_elevation(beacon.lat, beacon.lon)
+
         # Run through state machine
-        flight = self.state_machine.process_beacon(beacon, config)
+        flight = self.state_machine.process_beacon(beacon, config, terrain_m=terrain_m)
         if not flight:
             return None
 
@@ -223,6 +241,33 @@ class FlightTracker:
         await self._dispatch_events()
 
         return flight
+
+    async def _terrain_elevation(self, lat: float, lon: float) -> float | None:
+        """Ground elevation under a position, or None (fallback: airfield)."""
+        if self.elevation is None or not settings.terrain_agl_enabled:
+            return None
+        return await self.elevation.get(lat, lon)
+
+    async def classify_flight_end(
+        self, flight: FlightState, config: AirfieldConfig
+    ) -> FlightEndClassification:
+        """Classify a signal loss with the profile buffer (flight_profile_analyzer).
+
+        The analyzer's ``ground_elevation_m`` is the ground under the
+        *last known position*: the terrain model when available, the
+        airfield elevation otherwise. Not called by the beacon path yet
+        (the analyzer has no production consumer); ready for the alarm
+        escalation.
+        """
+        ground = None
+        if flight.latitude or flight.longitude:
+            ground = await self._terrain_elevation(flight.latitude, flight.longitude)
+        if ground is None:
+            ground = config.elevation_m
+        return analyze_profile(
+            self.profile_buffer.get(flight.flarm_id),
+            ground_elevation_m=ground,
+        )
 
     async def check_timeouts(self) -> None:
         """Check all flights for signal loss timeouts.
