@@ -12,8 +12,30 @@
 --   airfields              touch_go_max_ground_s, silence_landing_s
 -- Idempotent.
 
-ALTER TABLE flight_status ALTER COLUMN launch_type TYPE VARCHAR(24);
-ALTER TABLE flight_log ALTER COLUMN launch_type TYPE VARCHAR(24);
+-- Widen launch_type only when it is still narrower than 24 chars. The
+-- unconditional ALTER ... TYPE took an ACCESS EXCLUSIVE lock on both
+-- tables at every deploy (deploy.sh re-runs all migrations), blocking the
+-- worker's flight_status / flight_log writes for no reason.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'flight_status'
+          AND column_name = 'launch_type'
+          AND character_maximum_length < 24
+    ) THEN
+        ALTER TABLE flight_status ALTER COLUMN launch_type TYPE VARCHAR(24);
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'flight_log'
+          AND column_name = 'launch_type'
+          AND character_maximum_length < 24
+    ) THEN
+        ALTER TABLE flight_log ALTER COLUMN launch_type TYPE VARCHAR(24);
+    END IF;
+END $$;
 
 ALTER TABLE flight_status
     ADD COLUMN IF NOT EXISTS release_altitude_agl INT,
