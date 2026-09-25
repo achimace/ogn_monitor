@@ -744,6 +744,34 @@ Server -> Client (Alarm/Emergency/Outlanding):
 }
 
 
+=== 4b. ALARM-BEARBEITUNG: Flugleiter quittiert / kommentiert (API -> Redis -> Browser) ===
+
+// POST /api/monitor/{slug}/flights/{flarmId}/actions (Auth) schreibt eine Zeile in
+// flight_alarm_actions (Verlauf), setzt per HSET die Felder alarm_state, alarm_comment,
+// alarm_set_by, alarm_set_at im Flight-Hash und publiziert auf event:{slug}:
+//   {"type": "alarm_action", "flarm_id": "000239", "data": {alarm_state, alarm_comment,
+//    alarm_set_by, alarm_set_at}, "message": "Alarm quittiert (max@verein.de)"}
+// Der Forwarder liefert das als flight_update aus (Flug bleibt in der Liste); die
+// alarm_*-Felder erscheinen ausserdem camelCase in full_state und GET /api/monitor/{slug}.
+// Die State Machine im Worker fasst alarm_* nie an; mit der Archivierung des Flugs
+// verschwinden sie aus dem Hot State, der Verlauf bleibt in der Tabelle.
+
+Server -> Client:
+{
+  "type": "flight_update",
+  "flarmId": "000239",
+  "ts": "2026-03-11T14:25:10Z",
+  "eventType": "alarm_action",          // zusaetzlich zum normalen Delta
+  "message": "Alarm quittiert (max@verein.de)",
+  "d": {
+    "alarmState": "acknowledged",       // acknowledged / retrieval_underway / resolved / false_alarm
+    "alarmComment": "Pilot per Handy erreicht",   // "" wenn kein Kommentar
+    "alarmSetBy": "max@verein.de",
+    "alarmSetAt": "2026-03-11T14:25:10Z"
+  }
+}
+
+
 === 5. HEARTBEAT: Verbindung am Leben halten ===
 
 Server -> Client (alle 15 Sekunden):

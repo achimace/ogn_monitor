@@ -4,19 +4,61 @@ GET /api/monitor/{slug} returns the current flight state from Redis.
 No authentication required (public monitor).
 """
 
+import json
+from datetime import date as date_type
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.schemas import TrackPoint, TrackResponse
+from app.api.schemas import (
+    AlarmActionCreated,
+    AlarmActionItem,
+    AlarmActionList,
+    AlarmActionRequest,
+    AlarmHotState,
+    TrackPoint,
+    TrackResponse,
+)
 from app.config import settings
 from app.dependencies import get_current_user
 from app.redis_client import get_redis
+from app.tracking.flight_state import FlightStatus
 
 log = structlog.get_logger()
 
 router = APIRouter(prefix="/api/monitor", tags=["Monitor"])
+
+# Hot-state status -> alarm_kind of a Flugleiter action (everything else: "other").
+_STATUS_TO_ALARM_KIND: dict[int, str] = {
+    FlightStatus.ALARM: "alarm",
+    FlightStatus.EMERGENCY: "emergency",
+    FlightStatus.OUTLANDING: "outlanding",
+    FlightStatus.OUTLANDING_PENDING: "outlanding",
+    FlightStatus.SIGNAL_LOST: "signal_lost",
+}
+
+# German wording of the alarm_action event message (state -> text).
+_ALARM_STATE_TEXT: dict[str, str] = {
+    "acknowledged": "Alarm quittiert",
+    "retrieval_underway": "Rückholung läuft",
+    "resolved": "Alarm erledigt",
+    "false_alarm": "Fehlalarm",
+}
+
+_ACTION_COLUMNS = (
+    "id, state, comment, alarm_kind, set_by, created_at, flight_takeoff_ts"
+)
+
+# Display label for alarm_set_by in the public hot state when the tenant has
+# no name. The Flugleiter's e-mail never leaves the auth-only history.
+_ALARM_SET_BY_FALLBACK = "Flugleiter"
+
+
+def _alarm_set_by_label(tenant_name: str | None) -> str:
+    """Non-personal label shown to (anonymous) monitor clients."""
+    return (tenant_name or "").strip() or _ALARM_SET_BY_FALLBACK
 
 
 @router.get("/{slug}")
@@ -369,9 +411,246 @@ async def dismiss_flight(
     return {"ok": True, "flarm_id": flarm_id}
 
 
+# ---------------------------------------------------------------------------
+# Tower alarm workflow: acknowledge / annotate an alarm without removing the
+# flight. Every action is appended to flight_alarm_actions (history); the
+# latest one is mirrored into the flight hash as alarm_* fields (HSET only -
+# the worker's state machine never touches these fields, and they vanish
+# together with the hash when the flight is archived).
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{slug}/flights/{flarm_id}/actions",
+    response_model=AlarmActionCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_alarm_action(
+    slug: str,
+    flarm_id: str,
+    body: AlarmActionRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Record how the Flugleiter handled an alarm for a flight.
+
+    Auth + ownership as in ``dismiss_flight``. If the flight is in the hot
+    state, ``alarm_kind`` is derived from its status and
+    ``flight_takeoff_ts`` from its ``takeoff_time``; the hash then gets the
+    ``alarm_state``/``alarm_comment``/``alarm_set_by``/``alarm_set_at``
+    fields and an ``alarm_action`` event is published for the monitors.
+    Without hot state the action is still stored (``alarm_kind`` from the
+    body, default ``other``).
+
+    Privacy: the hash and the event are readable by anonymous monitor
+    clients, so ``alarm_set_by`` there is a *display label* (tenant name,
+    fallback "Flugleiter"). The user's e-mail is stored only in
+    ``flight_alarm_actions.set_by`` (auth-only history / ``action.setBy``).
+    """
+    from app.db.connection import get_db
+    db = get_db()
+
+    airfield = await _owned_airfield(db, slug, user)
+    airfield_id = airfield["id"]
+    set_by_label = _alarm_set_by_label(airfield.get("tenant_name"))
+    redis = get_redis()
+    flarm_id = flarm_id.upper()
+    key = f"flight:{slug}:{flarm_id}"
+
+    # 2. Hot state (optional)
+    hot = await redis.hgetall(key)
+    if hot:
+        alarm_kind = _alarm_kind_from_status(hot.get("status"))
+        takeoff_ts = _parse_iso(hot.get("takeoff_time"))
+    else:
+        alarm_kind = body.alarm_kind or "other"
+        takeoff_ts = None
+
+    # 3. History row
+    row = await db.fetchrow(
+        f"""
+        INSERT INTO flight_alarm_actions
+            (airfield_id, flarm_id, flight_takeoff_ts, alarm_kind, state, comment, set_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING {_ACTION_COLUMNS}
+        """,
+        airfield_id, flarm_id, takeoff_ts, alarm_kind, body.state, body.comment,
+        user["email"],
+    )
+    action = _action_item(row)
+    alarm_state = AlarmHotState(
+        alarm_state=body.state,
+        alarm_comment=body.comment or "",
+        alarm_set_by=set_by_label,
+        alarm_set_at=action.created_at,
+    )
+
+    # 4. Mirror into the hot state + notify monitors
+    mirrored = False
+    if hot:
+        fields = alarm_state.model_dump(by_alias=False)
+        await redis.hset(key, mapping=fields)
+        # Race: the worker may have archived the flight (DEL hash, SREM set)
+        # between HGETALL and HSET - the HSET then re-created the hash
+        # without TTL. Undo that instead of leaving an orphan behind.
+        if await redis.ttl(key) == -1:
+            await redis.delete(key)
+            log.warning(
+                "alarm_action_flight_gone",
+                slug=slug,
+                flarm_id=flarm_id,
+                state=body.state,
+            )
+        else:
+            mirrored = True
+            message = f"{_ALARM_STATE_TEXT[body.state]} ({set_by_label})"
+            await redis.publish(
+                f"event:{slug}",
+                json.dumps({
+                    "type": "alarm_action",
+                    "flarm_id": flarm_id,
+                    "data": fields,
+                    "message": message,
+                }),
+            )
+
+    log.info(
+        "alarm_action_recorded",
+        slug=slug,
+        flarm_id=flarm_id,
+        state=body.state,
+        alarm_kind=alarm_kind,
+        in_hot_state=mirrored,
+        by=user["email"],
+    )
+    return AlarmActionCreated(action=action, alarm_state=alarm_state)
+
+
+@router.get("/{slug}/flights/{flarm_id}/actions", response_model=AlarmActionList)
+async def list_flight_alarm_actions(
+    slug: str,
+    flarm_id: str,
+    date: date_type | None = Query(None, description="UTC day, default today"),
+    user: dict = Depends(get_current_user),
+):
+    """Alarm-action history of one aircraft for a UTC day, newest first."""
+    from app.db.connection import get_db
+    db = get_db()
+
+    airfield_id = await _owned_airfield_id(db, slug, user)
+    start, end = _utc_day_bounds(date)
+    rows = await db.fetch(
+        f"""
+        SELECT {_ACTION_COLUMNS}
+        FROM flight_alarm_actions
+        WHERE airfield_id = $1 AND flarm_id = $2
+          AND created_at >= $3 AND created_at < $4
+        ORDER BY created_at DESC, id DESC
+        """,
+        airfield_id, flarm_id.upper(), start, end,
+    )
+    items = [_action_item(r) for r in rows]
+    return AlarmActionList(items=items, count=len(items))
+
+
+@router.get("/{slug}/actions", response_model=AlarmActionList)
+async def list_airfield_alarm_actions(
+    slug: str,
+    date: date_type | None = Query(None, description="UTC day, default today"),
+    user: dict = Depends(get_current_user),
+):
+    """Alarm-action history of all aircraft of an airfield for a UTC day."""
+    from app.db.connection import get_db
+    db = get_db()
+
+    airfield_id = await _owned_airfield_id(db, slug, user)
+    start, end = _utc_day_bounds(date)
+    rows = await db.fetch(
+        f"""
+        SELECT {_ACTION_COLUMNS}
+        FROM flight_alarm_actions
+        WHERE airfield_id = $1
+          AND created_at >= $2 AND created_at < $3
+        ORDER BY created_at DESC, id DESC
+        """,
+        airfield_id, start, end,
+    )
+    items = [_action_item(r) for r in rows]
+    return AlarmActionList(items=items, count=len(items))
+
+
+async def _owned_airfield(db, slug: str, user: dict):
+    """Resolve the airfield and enforce tenant ownership (404 / 403).
+
+    Returns:
+        Record with ``id``, ``tenant_id`` and ``tenant_name`` (may be None).
+    """
+    row = await db.fetchrow(
+        """
+        SELECT a.id, a.tenant_id, t.name AS tenant_name
+        FROM airfields a
+        LEFT JOIN tenants t ON t.id = a.tenant_id
+        WHERE a.slug = $1
+        """,
+        slug,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Flugplatz nicht gefunden")
+    if row["tenant_id"] != user["tenant_id"]:
+        raise HTTPException(status_code=403, detail="Kein Zugriff auf diesen Flugplatz")
+    return row
+
+
+async def _owned_airfield_id(db, slug: str, user: dict) -> UUID:
+    """Airfield id after the ownership check of ``_owned_airfield``."""
+    return (await _owned_airfield(db, slug, user))["id"]
+
+
+def _alarm_kind_from_status(raw_status: str | None) -> str:
+    """Map a hot-state ``status`` value to an alarm_kind ("other" if unknown)."""
+    try:
+        code = int(raw_status or 0)
+    except ValueError:
+        return "other"
+    return _STATUS_TO_ALARM_KIND.get(code, "other")
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    """Parse an ISO 8601 UTC timestamp from the hot state (``""`` -> None)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _utc_day_bounds(day: date_type | None) -> tuple[datetime, datetime]:
+    """[start, end) of a UTC day as aware datetimes (default: today)."""
+    if day is None:
+        day = datetime.now(timezone.utc).date()
+    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    return start, start + timedelta(days=1)
+
+
+def _action_item(row) -> AlarmActionItem:
+    return AlarmActionItem(
+        id=row["id"],
+        state=row["state"],
+        comment=row["comment"],
+        alarm_kind=row["alarm_kind"],
+        set_by=row["set_by"],
+        created_at=_iso(row["created_at"]),
+        flight_takeoff_ts=_iso(row["flight_takeoff_ts"]) or None,
+    )
+
+
 def _iso(ts) -> str:
     if ts is None:
         return ""
+    if isinstance(ts, datetime) and ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc)
     if hasattr(ts, "strftime"):
         return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
     return str(ts)

@@ -170,6 +170,18 @@ class MonitorConnectionManager:
                 "ts": _utcnow_iso(),
                 "d": _to_camel_case(flight_data),
             }
+        elif event_type == "alarm_action":
+            # Flugleiter acknowledged / annotated an alarm (API, not worker).
+            # The flight stays; merge the alarm_* fields like any delta and
+            # carry the event name + text so clients can show a toast.
+            ws_msg = {
+                "type": "flight_update",
+                "flarmId": flarm_id,
+                "ts": _utcnow_iso(),
+                "d": _to_camel_case(flight_data),
+                "eventType": event_type,
+                "message": message_text,
+            }
         else:
             ws_msg = {
                 "type": "event",
