@@ -14,6 +14,16 @@ OGN DDB privacy: this class is the single choke point for the DDB
 any state machine, hot-state, track-stream, event or flight_log write
 (see docs/dev-guides/implement-flight-logic.md).
 
+The same choke point applies three more drop rules (same doc, section
+"Typfilter, Ignorierliste, Beacon-Plausibilitaet"), in this order:
+
+1. implausible beacon (``altitude <= 0 and speed <= 0``: an ADS-B relay
+   without position data) - discarded for every airfield;
+2. ignored aircraft category (``settings.ignored_aircraft_categories``,
+   e.g. helicopters) - dropped for every airfield, like ``tracked = N``;
+3. per-airfield ignore list (``AirfieldConfig.ignored_flarm_ids``) - the
+   beacon is dropped for THAT airfield only.
+
 Terrain AGL: for beacons of an already tracked flight the ground elevation
 under the aircraft is resolved from ``ElevationService`` (cache, DB on a
 miss) *before* the CPU-bound state machine call and passed in. Beacons of
@@ -30,20 +40,38 @@ import structlog
 from app.aprs.beacon_parser import Beacon, parse_beacon
 from app.config import settings
 from app.data.aircraft_resolver import AircraftResolver
+from app.tracking.aircraft_category import (
+    AircraftCategory,
+    category_for_beacon,
+    parse_category_list,
+)
 from app.tracking.airports import AirportIndex
 from app.tracking.elevation import ElevationService
 from app.tracking.flight_profile_analyzer import FlightEndClassification, analyze_profile
 from app.tracking.flight_profile_buffer import FlightProfileBuffer
 from app.tracking.flight_state import FlightState, FlightStatus
-from app.tracking.flight_state_machine import AirfieldConfig, FlightStateMachine
+from app.tracking.flight_state_machine import AirfieldConfig, FlightStateMachine, _bounded_put
 from app.tracking.launch_detector import LaunchDetector
 from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE, RedisWriter
 
 log = structlog.get_logger()
 
-# Dropped beacons of an untracked device are logged (debug) at most once
-# per device within this interval - a switched-on FLARM sends ~1 beacon/s.
+# Dropped beacons of an untracked / ignored / implausible device are logged
+# (debug) at most once per device and drop reason within this interval - a
+# switched-on FLARM sends ~1 beacon/s.
 UNTRACKED_LOG_INTERVAL_S = 3600
+
+# Upper bound on the per-reason drop counter / last-log dicts (keyed by
+# FLARM id): the worker sees every device inside the APRS filter radius,
+# so without a bound they would grow for the lifetime of the process.
+# Oldest entries are evicted first; a counter restarts at 1 for them.
+DROP_COUNTER_MAX_ENTRIES = 20_000
+
+# Drop reasons (counter keys and log event names)
+DROP_UNTRACKED = "untracked"          # DDB tracked = N
+DROP_IMPLAUSIBLE = "implausible"      # altitude == 0 and speed == 0 (relay)
+DROP_CATEGORY = "ignored_category"    # settings.ignored_aircraft_categories
+DROP_AIRFIELD_IGNORED = "airfield_ignored"  # per-airfield ignore list
 
 # flight_status rows of evicted (tracked = N) aircraft whose DELETE failed
 # are retried in check_timeouts(); the retry set is bounded, best effort.
@@ -88,8 +116,21 @@ class FlightTracker:
 
         # DDB tracked=N: dropped-beacon counter and last debug-log time
         # (monotonic) per flarm_id, for the rate-limited log only.
+        # All of these dicts are bounded to DROP_COUNTER_MAX_ENTRIES.
         self._untracked_drops: dict[str, int] = {}
         self._untracked_logged_at: dict[str, float] = {}
+        # Same for the other drop reasons: reason -> flarm_id -> count /
+        # last log time. Airfield ignore-list drops are keyed "{slug}:{fid}".
+        self._drops: dict[str, dict[str, int]] = {
+            DROP_IMPLAUSIBLE: {}, DROP_CATEGORY: {}, DROP_AIRFIELD_IGNORED: {},
+        }
+        self._drops_logged_at: dict[str, dict[str, float]] = {
+            DROP_IMPLAUSIBLE: {}, DROP_CATEGORY: {}, DROP_AIRFIELD_IGNORED: {},
+        }
+        # Aircraft type filter (config), see _is_ignored_category()
+        self._ignored_categories: frozenset[AircraftCategory] = parse_category_list(
+            settings.ignored_aircraft_categories
+        )
         # (airfield_id, flarm_id) of evicted flights whose flight_status
         # DELETE failed; retried in check_timeouts().
         self._status_delete_retry: set[tuple[int, str]] = set()
@@ -109,9 +150,19 @@ class FlightTracker:
         if not beacon:
             return
 
+        # Relay beacon without position data: nothing to process
+        if self._is_implausible(beacon):
+            self._count_drop(DROP_IMPLAUSIBLE, beacon.flarm_id, beacon)
+            return
+
         # DDB privacy: opted-out devices never reach any airfield
         if self._is_untracked(beacon.flarm_id):
             await self._drop_untracked_beacon(beacon)
+            return
+
+        # Type filter: helicopters, balloons, ... never reach any airfield
+        if self._is_ignored_category(beacon):
+            await self._drop_ignored_category_beacon(beacon)
             return
 
         # Stage 2: a flight belongs to at most one airfield. An aircraft
@@ -138,10 +189,20 @@ class FlightTracker:
         """
         slug = config.slug
 
-        # DDB privacy choke point (also for direct callers / tests):
-        # nothing below may run for an opted-out device.
+        # Choke point (also for direct callers / tests): nothing below may
+        # run for an implausible beacon, an opted-out device, an ignored
+        # category or an id on this airfield's ignore list.
+        if self._is_implausible(beacon):
+            self._count_drop(DROP_IMPLAUSIBLE, beacon.flarm_id, beacon)
+            return None
         if self._is_untracked(beacon.flarm_id):
             await self._drop_untracked_beacon(beacon)
+            return None
+        if self._is_ignored_category(beacon):
+            await self._drop_ignored_category_beacon(beacon)
+            return None
+        if beacon.flarm_id in config.ignored_flarm_ids:
+            await self._drop_airfield_ignored_beacon(beacon, config)
             return None
 
         # Check if we're already tracking this flight at this airfield
@@ -295,9 +356,11 @@ class FlightTracker:
 
         Called periodically (~30s) by the worker.
         """
-        # DDB reload may have flipped tracked -> N for a flight in progress
-        # whose FLARM is already off (no beacon will ever evict it).
-        await self._evict_untracked_flights()
+        # DDB reload may have flipped tracked -> N (or the category to an
+        # ignored one), a config reload may have put the id on the
+        # airfield's ignore list - for a flight in progress whose FLARM is
+        # already off (no beacon will ever evict it).
+        await self.evict_ignored_flights()
         await self._retry_flight_status_deletes()
 
         changed = self.state_machine.check_timeouts(self._configs)
@@ -418,8 +481,17 @@ class FlightTracker:
                         log.info("flight_recovery_dropped_untracked", slug=slug, flarm_id=fid)
                         continue
                     flight = FlightState.from_redis(data, slug)
+                    config = self._configs.get(slug)
+                    reason = self._ignore_reason(flight, config)
+                    if reason is not None:
+                        # Type filter / ignore list changed while the
+                        # worker was down: purge, no flight_log.
+                        await self.redis_writer.remove_flight(slug, fid)
+                        await self.redis_writer.delete_track(slug, fid)
+                        log.info("flight_recovery_dropped_ignored", slug=slug,
+                                 flarm_id=fid, reason=reason)
+                        continue
                     if flight.flarm_id:
-                        config = self._configs.get(slug)
                         if config:
                             flight.airfield_id = config.id
                         self.state_machine.restore_flight(slug, flight)
@@ -466,31 +538,36 @@ class FlightTracker:
         for slug in list(self._configs):
             flight = self.state_machine.get_flight(slug, fid)
             if flight is not None:
-                await self._evict_untracked_flight(slug, flight)
+                await self._evict_untracked_flight(slug, flight, DROP_UNTRACKED)
             self.state_machine.discard_ground_contact(slug, fid)
 
         count = self._untracked_drops.get(fid, 0) + 1
-        self._untracked_drops[fid] = count
+        _bounded_put(self._untracked_drops, fid, count, DROP_COUNTER_MAX_ENTRIES)
         now = time.monotonic()
         last = self._untracked_logged_at.get(fid)
         if last is None or now - last >= UNTRACKED_LOG_INTERVAL_S:
-            self._untracked_logged_at[fid] = now
+            _bounded_put(self._untracked_logged_at, fid, now, DROP_COUNTER_MAX_ENTRIES)
             log.debug("beacon_dropped_untracked", flarm_id=fid, dropped=count)
 
     async def _evict_untracked_flights(self) -> None:
         """Evict every active flight whose device is (now) untracked."""
         for flight in list(self.state_machine.get_all_active_flights()):
             if self._is_untracked(flight.flarm_id):
-                await self._evict_untracked_flight(flight.airfield_slug, flight)
+                await self._evict_untracked_flight(flight.airfield_slug, flight, DROP_UNTRACKED)
 
-    async def _evict_untracked_flight(self, slug: str, flight: FlightState) -> None:
-        """Remove a flight of an opted-out device from every store.
+    async def _evict_untracked_flight(self, slug: str, flight: FlightState,
+                                      reason: str = DROP_UNTRACKED) -> None:
+        """Remove a flight of an opted-out / ignored device from every store.
 
         Unlike a normal archive this also drops the 24 h track stream and
-        the flight_status row, and it never writes flight_log. Events the
+        the flight_status row, and it never writes flight_log (history
+        rows of earlier, regularly archived flights are kept). Events the
         eviction might leave behind are discarded, not published; flights
         paired with the evicted aircraft (tow partner) lose every
         reference to it before anything is written.
+
+        ``reason``: DROP_UNTRACKED / DROP_CATEGORY / DROP_AIRFIELD_IGNORED
+        (log field only).
         """
         fid = flight.flarm_id
         await self._blank_partner_refs(slug, fid)
@@ -509,8 +586,115 @@ class FlightTracker:
             flarm_id=fid,
             airfield=slug,
             status=flight.status.name,
+            reason=reason,
         )
         await self._dispatch_events()
+
+    # ------------------------------------------------------------------
+    # Type filter, per-airfield ignore list, beacon plausibility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_implausible(beacon: Beacon) -> bool:
+        """ADS-B relay beacon without position data (altitude 0, speed 0).
+
+        Such beacons carry exactly 0 m / 0 km/h, no information for the
+        state machine, and would satisfy the ground-contact rule far below
+        the field; they are discarded before anything else. The check is
+        an exact match on purpose: a parked aircraft at a sea-level field
+        reports a *negative* altitude as GPS noise and is a real beacon.
+        """
+        return beacon.altitude == 0 and beacon.speed == 0
+
+    def _category_of(self, flarm_id: str, device_type: int) -> AircraftCategory:
+        """Effective category: tenant / registry when known, else the beacon type."""
+        info = self.aircraft_resolver.resolve(flarm_id)
+        return category_for_beacon(info.category if info is not None else None, device_type)
+
+    def _is_ignored_category(self, beacon: Beacon) -> bool:
+        """True if the aircraft's category is in settings.ignored_aircraft_categories."""
+        if not self._ignored_categories:
+            return False
+        return self._category_of(beacon.flarm_id, beacon.device_type) in self._ignored_categories
+
+    def _ignore_reason(self, flight: FlightState,
+                       config: AirfieldConfig | None) -> str | None:
+        """Why an existing flight must be evicted (None = keep it).
+
+        Used without a beacon (check_timeouts, recovery): the category
+        falls back to the type stored on the flight from its last beacon.
+        """
+        if config is not None and flight.flarm_id in config.ignored_flarm_ids:
+            return DROP_AIRFIELD_IGNORED
+        if (self._ignored_categories
+                and self._category_of(flight.flarm_id, flight.flarm_aircraft_type)
+                in self._ignored_categories):
+            return DROP_CATEGORY
+        return None
+
+    def _count_drop(self, reason: str, key: str, beacon: Beacon, **fields) -> int:
+        """Count a dropped beacon and log it (debug) at most once per key and hour."""
+        counter = self._drops[reason]
+        count = counter.get(key, 0) + 1
+        _bounded_put(counter, key, count, DROP_COUNTER_MAX_ENTRIES)
+        now = time.monotonic()
+        logged = self._drops_logged_at[reason]
+        last = logged.get(key)
+        if last is None or now - last >= UNTRACKED_LOG_INTERVAL_S:
+            _bounded_put(logged, key, now, DROP_COUNTER_MAX_ENTRIES)
+            log.debug(f"beacon_dropped_{reason}", flarm_id=beacon.flarm_id,
+                      dropped=count, **fields)
+        return count
+
+    async def _drop_ignored_category_beacon(self, beacon: Beacon) -> None:
+        """Discard a beacon of an ignored aircraft category (every airfield).
+
+        Same eviction as a DDB opt-out: the category may have become known
+        (DDB / tenant reload) while the aircraft was already tracked.
+        """
+        fid = beacon.flarm_id
+        for slug in list(self._configs):
+            flight = self.state_machine.get_flight(slug, fid)
+            if flight is not None:
+                await self._evict_untracked_flight(slug, flight, DROP_CATEGORY)
+            self.state_machine.discard_ground_contact(slug, fid)
+        self._count_drop(
+            DROP_CATEGORY, fid, beacon,
+            category=self._category_of(fid, beacon.device_type).value,
+        )
+
+    async def _drop_airfield_ignored_beacon(self, beacon: Beacon, config: AirfieldConfig) -> None:
+        """Discard a beacon for ONE airfield whose ignore list names the id.
+
+        Evicts a flight of that aircraft at this airfield only; other
+        airfields keep tracking it.
+        """
+        fid = beacon.flarm_id
+        slug = config.slug
+        flight = self.state_machine.get_flight(slug, fid)
+        if flight is not None:
+            await self._evict_untracked_flight(slug, flight, DROP_AIRFIELD_IGNORED)
+        self.state_machine.discard_ground_contact(slug, fid)
+        self._count_drop(DROP_AIRFIELD_IGNORED, f"{slug}:{fid}", beacon, airfield=slug)
+
+    async def evict_ignored_flights(self) -> None:
+        """Evict active flights that must no longer be tracked.
+
+        Covers DDB ``tracked = N``, an ignored category and the airfield
+        ignore list - after a DDB / config reload, for aircraft that send
+        no beacon any more. Called from ``check_timeouts()`` and by the
+        worker right after a config reload.
+        """
+        await self._evict_untracked_flights()
+        for flight in list(self.state_machine.get_all_active_flights()):
+            slug = flight.airfield_slug
+            reason = self._ignore_reason(flight, self._configs.get(slug))
+            if reason is not None:
+                await self._evict_untracked_flight(slug, flight, reason)
+        # Parked aircraft (ground cache) that are now on an ignore list
+        for slug, config in self._configs.items():
+            for fid in config.ignored_flarm_ids:
+                self.state_machine.discard_ground_contact(slug, fid)
 
     async def _blank_partner_refs(self, slug: str, flarm_id: str) -> None:
         """Remove an evicted aircraft from the flights it was paired with.

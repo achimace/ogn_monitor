@@ -703,3 +703,324 @@ async def test_classify_flight_end_uses_terrain_at_last_position(tracker):
     tracker.elevation = FakeElevation(None)
     result_af = await tracker.classify_flight_end(flight, tracker._configs["test"])
     assert result_af.scenario == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Aircraft type filter (settings.ignored_aircraft_categories)
+# ---------------------------------------------------------------------------
+
+from app.tracking.aircraft_category import AircraftCategory as _C  # noqa: E402
+from app.tracking.flight_tracker import (  # noqa: E402
+    DROP_AIRFIELD_IGNORED,
+    DROP_CATEGORY,
+    DROP_IMPLAUSIBLE,
+    DROP_UNTRACKED,
+)
+
+HELI = "3E0001"
+
+
+def _assert_nothing_tracked(tracker: FlightTracker, fid: str):
+    rw = tracker.redis_writer
+    assert tracker.state_machine.get_all_active_flights() == []
+    assert fid not in tracker.state_machine._ground_cache.get("test", {})
+    assert rw.flights == {} and rw.events == [] and rw.track_points == []
+    assert rw.beacons == [] and rw.positions == []
+    assert not tracker.launch_detector.is_pending(fid)
+    tracker._archive_to_log.assert_not_awaited()
+
+
+async def test_helicopter_beacon_type_is_dropped_entirely(tracker):
+    """Beacon type 3 (helicopter) - unknown to the DDB - never reaches the
+    state machine: no ground contact, no takeoff, no hot state."""
+    assert _C.HELICOPTER in tracker._ignored_categories
+    await _feed(tracker, ground_roll(HELI, device_type=3))
+    # every beacon of a device carries its type (fly_away defaults to 0)
+    await _feed(tracker, [replace(b, device_type=3) for b in fly_away(HELI, 30)])
+    _assert_nothing_tracked(tracker, HELI)
+    assert tracker._drops[DROP_CATEGORY][HELI] == 9
+
+
+async def test_ddb_helicopter_overrides_unknown_beacon_type(tracker):
+    tracker.aircraft_resolver.infos[HELI] = replace(
+        _info(HELI, registration="D-HYAU"), category=_C.HELICOPTER)
+    await _feed(tracker, ground_roll(HELI, device_type=0))
+    _assert_nothing_tracked(tracker, HELI)
+    assert tracker._drops[DROP_CATEGORY][HELI] == 6
+
+
+async def test_ddb_glider_overrides_wrong_beacon_type(tracker):
+    """A glider whose FLARM is (mis)configured as helicopter is tracked."""
+    tracker.aircraft_resolver.infos[GLD] = replace(
+        _info(GLD, registration="D-1234"), category=_C.GLIDER)
+    flight = await _feed(tracker, ground_roll(GLD, device_type=3))
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+    assert ("test", GLD) in tracker.redis_writer.flights
+    assert DROP_CATEGORY not in tracker._drops or GLD not in tracker._drops[DROP_CATEGORY]
+
+
+async def test_powered_and_jet_beacons_stay_tracked(tracker):
+    for fid, dtype in (("PWR001", 8), ("JET001", 9), ("TOW001", 2)):
+        flight = await _feed(tracker, ground_roll(fid, device_type=dtype))
+        assert flight is not None and flight.status == FlightStatus.TAKEOFF, fid
+
+
+async def test_category_filter_can_be_switched_off(tracker):
+    tracker._ignored_categories = frozenset()
+    flight = await _feed(tracker, ground_roll(HELI, device_type=3))
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+
+
+async def test_process_line_drops_ignored_category_before_any_airfield(tracker, monkeypatch):
+    tracker.set_configs({"test": make_config(), "other": make_config(id=2, slug="other")})
+    b = ground_roll(HELI, device_type=3)[0]
+    monkeypatch.setattr("app.tracking.flight_tracker.parse_beacon", lambda line: b)
+    per_airfield = AsyncMock()
+    monkeypatch.setattr(tracker, "_process_beacon_for_airfield", per_airfield)
+
+    await tracker.process_line("raw aprs line")
+
+    per_airfield.assert_not_awaited()
+    assert tracker._drops[DROP_CATEGORY][HELI] == 1
+
+
+async def test_category_drop_is_logged_once_per_hour(tracker, monkeypatch):
+    fake_log = MagicMock()
+    monkeypatch.setattr("app.tracking.flight_tracker.log", fake_log)
+    clock = [1000.0]
+    monkeypatch.setattr("app.tracking.flight_tracker.time.monotonic", lambda: clock[0])
+
+    await _feed(tracker, ground_roll(HELI, device_type=3)[:3])
+    assert fake_log.debug.call_count == 1
+    assert fake_log.debug.call_args.kwargs["category"] == "helicopter"
+    clock[0] += 3600
+    await _feed(tracker, ground_roll(HELI, device_type=3)[:1])
+    assert fake_log.debug.call_count == 2
+    assert fake_log.debug.call_args.kwargs["dropped"] == 4
+
+
+async def test_category_becoming_known_evicts_flying_aircraft(tracker):
+    """DDB / tenant reload: the flying aircraft turns out to be a helicopter."""
+    await _feed(tracker, ground_roll(HELI))
+    await _feed(tracker, fly_away(HELI, 30))
+    assert tracker.state_machine.get_flight("test", HELI).status == FlightStatus.FLYING
+    events_before = list(tracker.redis_writer.events)
+
+    tracker.aircraft_resolver.infos[HELI] = replace(_info(HELI), category=_C.HELICOPTER)
+    assert await _feed(tracker, [_flying(HELI, 60)]) is None
+
+    rw = tracker.redis_writer
+    assert tracker.state_machine.get_flight("test", HELI) is None
+    assert ("test", HELI) not in rw.flights
+    assert rw.deleted_tracks == [("test", HELI)]
+    assert rw.events == events_before
+    tracker._archive_to_log.assert_not_awaited()
+    tracker._delete_flight_status.assert_awaited_once()
+
+
+async def test_check_timeouts_evicts_flight_of_ignored_category(tracker):
+    """Category known after the FLARM went silent: evicted from the stored
+    beacon type (flarm_aircraft_type), no beacon needed."""
+    await _feed(tracker, ground_roll(HELI, device_type=0))
+    await _feed(tracker, fly_away(HELI, 30))
+    tracker.aircraft_resolver.infos[HELI] = replace(_info(HELI), category=_C.HELICOPTER)
+
+    await tracker.check_timeouts()
+
+    assert tracker.state_machine.get_flight("test", HELI) is None
+    assert ("test", HELI) not in tracker.redis_writer.flights
+    tracker._archive_to_log.assert_not_awaited()
+
+
+async def test_recover_from_redis_purges_ignored_category(tracker):
+    flight = FlightState(flarm_id=HELI, airfield_slug="test", status=FlightStatus.FLYING,
+                         flarm_aircraft_type=3)
+    tracker.redis_writer.flights[("test", HELI)] = flight.to_redis_dict()
+    assert await tracker.recover_from_redis() == 0
+    assert ("test", HELI) not in tracker.redis_writer.flights
+    assert tracker.redis_writer.deleted_tracks == [("test", HELI)]
+    assert tracker.state_machine.get_flight("test", HELI) is None
+
+
+# ---------------------------------------------------------------------------
+# Per-airfield ignore list (AirfieldConfig.ignored_flarm_ids)
+# ---------------------------------------------------------------------------
+
+async def test_airfield_ignore_list_drops_beacons_for_that_airfield(tracker):
+    tracker.set_configs({"test": make_config(ignored_flarm_ids=frozenset({GLD}))})
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    _assert_nothing_tracked(tracker, GLD)
+    assert tracker._drops[DROP_AIRFIELD_IGNORED][f"test:{GLD}"] == 9
+
+
+async def test_airfield_ignore_list_leaves_other_airfields_alone(tracker, monkeypatch):
+    """The id is ignored at 'test' only: 'other' (same place) tracks it."""
+    other = make_config(id=2, slug="other")
+    tracker.set_configs({
+        "test": make_config(ignored_flarm_ids=frozenset({GLD})),
+        "other": other,
+    })
+    beacons = ground_roll(GLD) + fly_away(GLD, 30)
+    for b in beacons:
+        monkeypatch.setattr("app.tracking.flight_tracker.parse_beacon", lambda line, b=b: b)
+        await tracker.process_line("raw")
+
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert tracker.state_machine.get_flight("other", GLD).status == FlightStatus.FLYING
+    assert ("other", GLD) in tracker.redis_writer.flights
+    assert ("test", GLD) not in tracker.redis_writer.flights
+
+
+async def test_ignore_list_change_evicts_flight_on_next_beacon(tracker):
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    assert ("test", GLD) in tracker.redis_writer.flights
+    events_before = list(tracker.redis_writer.events)
+
+    # API POST -> config reload with the id on the list
+    tracker.set_configs({"test": make_config(ignored_flarm_ids=frozenset({GLD}))})
+    assert await _feed(tracker, [_flying(GLD, 60)]) is None
+
+    rw = tracker.redis_writer
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert ("test", GLD) not in rw.flights
+    assert rw.deleted_tracks == [("test", GLD)]
+    assert rw.events == events_before
+    assert not tracker.launch_detector.is_pending(GLD)
+    tracker._archive_to_log.assert_not_awaited()         # flight_log history untouched
+    tracker._delete_flight_status.assert_awaited_once()
+
+    # Removing it from the list makes it trackable again
+    tracker.set_configs({"test": make_config()})
+    flight = await _feed(tracker, ground_roll(GLD, t0=900))
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+
+
+async def test_ignore_list_change_evicts_flight_in_check_timeouts(tracker):
+    await _feed(tracker, ground_roll(GLD))
+    await _feed(tracker, fly_away(GLD, 30))
+    events_before = list(tracker.redis_writer.events)
+
+    tracker.set_configs({"test": make_config(ignored_flarm_ids=frozenset({GLD}))})
+    await tracker.check_timeouts()
+
+    assert tracker.state_machine.get_flight("test", GLD) is None
+    assert ("test", GLD) not in tracker.redis_writer.flights
+    assert tracker.redis_writer.deleted_tracks == [("test", GLD)]
+    assert tracker.redis_writer.events == events_before
+    tracker._archive_to_log.assert_not_awaited()
+
+
+async def test_evict_ignored_flights_forgets_parked_ignored_aircraft(tracker):
+    await _feed(tracker, ground_roll(GLD)[:2])
+    assert GLD in tracker.state_machine._ground_cache["test"]
+    tracker.set_configs({"test": make_config(ignored_flarm_ids=frozenset({GLD}))})
+    await tracker.evict_ignored_flights()
+    assert GLD not in tracker.state_machine._ground_cache["test"]
+
+
+async def test_recover_from_redis_purges_airfield_ignored_flight(tracker):
+    tracker.set_configs({"test": make_config(ignored_flarm_ids=frozenset({GLD}))})
+    flight = FlightState(flarm_id=GLD, airfield_slug="test", status=FlightStatus.FLYING)
+    tracker.redis_writer.flights[("test", GLD)] = flight.to_redis_dict()
+    assert await tracker.recover_from_redis() == 0
+    assert ("test", GLD) not in tracker.redis_writer.flights
+    assert tracker.state_machine.get_flight("test", GLD) is None
+
+
+# ---------------------------------------------------------------------------
+# Beacon plausibility (ADS-B relay without data)
+# ---------------------------------------------------------------------------
+
+def _relay_empty(fid: str, t: float):
+    """Relay beacon at the airfield position with altitude 0 / speed 0."""
+    return beacon(fid, t, alt=0, speed=0)
+
+
+async def test_relay_beacon_without_data_is_discarded_before_anything(tracker, monkeypatch):
+    b = _relay_empty("3E71D4", 0)
+    monkeypatch.setattr("app.tracking.flight_tracker.parse_beacon", lambda line: b)
+    sm = AsyncMock()
+    monkeypatch.setattr(tracker, "_process_beacon_for_airfield", sm)
+    await tracker.process_line("raw")
+    sm.assert_not_awaited()
+    assert tracker._drops[DROP_IMPLAUSIBLE]["3E71D4"] == 1
+    assert tracker.state_machine._ground_cache.get("test", {}) == {}
+
+
+async def test_airliner_after_empty_relay_beacon_never_takes_off(tracker):
+    """Production bug: 0 m / 0 km/h relay beacons counted as parked at the
+    field, the next real beacon (11 000 m, 800 km/h) became a takeoff."""
+    fid = "3E71D4"
+    await _feed(tracker, [_relay_empty(fid, 0), _relay_empty(fid, 5)])
+    await _feed(tracker, [
+        beacon(fid, 10, east=500, alt=11000, speed=800, device_type=9),
+        beacon(fid, 15, east=1500, alt=11000, speed=800, device_type=9),
+        beacon(fid, 20, east=2500, alt=11000, speed=800, device_type=9),
+    ])
+    _assert_nothing_tracked(tracker, fid)
+    assert tracker._drops[DROP_IMPLAUSIBLE][fid] == 2
+
+
+async def test_real_glider_on_the_field_still_takes_off(tracker):
+    flight = await _feed(tracker, ground_roll(GLD))
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+    assert DROP_IMPLAUSIBLE not in tracker._drops or GLD not in tracker._drops[DROP_IMPLAUSIBLE]
+
+
+async def test_parked_aircraft_with_negative_altitude_at_sea_level_field_is_kept(tracker):
+    """Speed 0, altitude -10 m at a 5 m field: GPS noise, not a relay beacon.
+
+    Only the exact 0 m / 0 km/h pair is a data-less relay beacon; ``<= 0``
+    would discard every parked aircraft at a sea-level field.
+    """
+    tracker.set_configs({"test": make_config(elevation_m=5.0)})
+    b = beacon(GLD, 0, alt=-10, speed=0)
+    assert not FlightTracker._is_implausible(b)
+    spy = MagicMock(wraps=tracker.state_machine.process_beacon)
+    tracker.state_machine.process_beacon = spy
+    await _feed(tracker, [b, beacon(GLD, 3, alt=-10, speed=0)])
+    assert GLD not in tracker._drops[DROP_IMPLAUSIBLE]
+    assert spy.call_count == 2  # reached the state machine, not discarded
+
+
+def test_only_exact_zero_pair_is_implausible():
+    assert FlightTracker._is_implausible(beacon("X", 0, alt=0, speed=0))
+    assert not FlightTracker._is_implausible(beacon("X", 0, alt=0, speed=1))
+    assert not FlightTracker._is_implausible(beacon("X", 0, alt=1, speed=0))
+    assert not FlightTracker._is_implausible(beacon("X", 0, alt=-1, speed=0))
+
+
+# ---------------------------------------------------------------------------
+# Drop counters are bounded (every device in the APRS radius hits them)
+# ---------------------------------------------------------------------------
+
+async def test_drop_counters_are_bounded_per_reason(tracker, monkeypatch):
+    monkeypatch.setattr("app.tracking.flight_tracker.DROP_COUNTER_MAX_ENTRIES", 3)
+    for i in range(5):
+        tracker._count_drop(DROP_IMPLAUSIBLE, f"ID{i}", _relay_empty(f"ID{i}", 0))
+    assert len(tracker._drops[DROP_IMPLAUSIBLE]) == 3
+    assert len(tracker._drops_logged_at[DROP_IMPLAUSIBLE]) == 3
+    # oldest evicted, newest kept
+    assert set(tracker._drops[DROP_IMPLAUSIBLE]) == {"ID2", "ID3", "ID4"}
+    assert set(tracker._drops_logged_at[DROP_IMPLAUSIBLE]) == {"ID2", "ID3", "ID4"}
+    # an existing key keeps counting without evicting anything
+    tracker._count_drop(DROP_IMPLAUSIBLE, "ID4", _relay_empty("ID4", 1))
+    assert tracker._drops[DROP_IMPLAUSIBLE]["ID4"] == 2
+    assert set(tracker._drops[DROP_IMPLAUSIBLE]) == {"ID2", "ID3", "ID4"}
+    # other reasons are unaffected
+    assert tracker._drops[DROP_CATEGORY] == {}
+
+
+async def test_untracked_drop_counters_are_bounded(tracker, monkeypatch):
+    monkeypatch.setattr("app.tracking.flight_tracker.DROP_COUNTER_MAX_ENTRIES", 3)
+    ids = [f"UT{i}" for i in range(5)]
+    for fid in ids:
+        tracker.aircraft_resolver.infos[fid] = _info(fid, tracked=False)
+        await tracker._drop_untracked_beacon(beacon(fid, 0, speed=0))
+    assert len(tracker._untracked_drops) == 3
+    assert len(tracker._untracked_logged_at) == 3
+    assert set(tracker._untracked_drops) == set(ids[2:])
+    assert set(tracker._untracked_logged_at) == set(ids[2:])
+    assert DROP_UNTRACKED not in tracker._drops  # separate dicts, both bounded

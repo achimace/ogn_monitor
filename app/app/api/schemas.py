@@ -282,6 +282,33 @@ class _CamelModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+class IgnoredAircraftCreateRequest(BaseModel):
+    """POST /api/airfields/{id}/ignored-aircraft body (snake_case)."""
+    flarm_id: str = Field(..., min_length=4, max_length=16, pattern=r"^[A-Fa-f0-9]+$")
+    note: str | None = Field(None, max_length=120)
+
+    @field_validator("flarm_id")
+    @classmethod
+    def uppercase_flarm(cls, v: str) -> str:
+        return v.upper()
+
+    @field_validator("note")
+    @classmethod
+    def _strip_note(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class IgnoredAircraftItem(_CamelModel):
+    """One row of airfield_ignored_aircraft (camelCase on the wire)."""
+    id: UUID
+    flarm_id: str
+    note: str | None = None
+    created_at: datetime | None = None
+
+
 class AlarmActionItem(_CamelModel):
     """One row of flight_alarm_actions."""
     id: UUID

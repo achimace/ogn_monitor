@@ -159,6 +159,26 @@ AIRCRAFT_DELETE = """
     DELETE FROM tenant_aircraft WHERE airfield_id = $1 AND flarm_id = $2
 """
 
+# Per-airfield ignore list (migration 012)
+IGNORED_AIRCRAFT_LIST = """
+    SELECT id, flarm_id, note, created_at
+    FROM airfield_ignored_aircraft WHERE airfield_id = $1
+    ORDER BY created_at, flarm_id
+"""
+
+# Returns no row on a duplicate (airfield_id, flarm_id) -> 409 in the API
+IGNORED_AIRCRAFT_INSERT = """
+    INSERT INTO airfield_ignored_aircraft (airfield_id, flarm_id, note)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (airfield_id, flarm_id) DO NOTHING
+    RETURNING id, flarm_id, note, created_at
+"""
+
+IGNORED_AIRCRAFT_DELETE = """
+    DELETE FROM airfield_ignored_aircraft WHERE airfield_id = $1 AND flarm_id = $2
+    RETURNING id
+"""
+
 AIRCRAFT_UPSERT = """
     INSERT INTO tenant_aircraft (airfield_id, flarm_id, registration, competition_sign, aircraft_model, aircraft_type)
     VALUES ($1, $2, $3, $4, $5, $6)

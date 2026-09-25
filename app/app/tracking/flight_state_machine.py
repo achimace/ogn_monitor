@@ -159,6 +159,8 @@ class AirfieldConfig:
     tow_plane_flarm_ids: list[str] | None = None
     winch_vs_threshold_ms: float = 8.0
     ground_speed_max_kmh: int = 30
+    # Ground contact band: |altitude - reference elevation| below this
+    # (both above and below the runway, see _ground_plausible)
     ground_max_agl_m: int = 50
     # Altitude band around airfield elevation considered "near ground" (m)
     near_ground_band_m: int = 60
@@ -178,6 +180,11 @@ class AirfieldConfig:
     visitor_zone_km: int = 15
     visitor_max_agl_m: int = 1500
     foreign_ground_max_entries: int = 5000
+    # Per-airfield ignore list (table airfield_ignored_aircraft, API
+    # /api/airfields/{id}/ignored-aircraft): FLARM-IDs (uppercase) that are
+    # never tracked at THIS airfield (rescue helicopter of the clinic next
+    # door, ...). Other airfields are unaffected. Enforced by FlightTracker.
+    ignored_flarm_ids: frozenset[str] = frozenset()
 
     @property
     def display_name(self) -> str:
@@ -217,6 +224,30 @@ def _seconds_since_iso(iso: str) -> float | None:
     if not ts:
         return None
     return time.time() - ts
+
+
+def _ground_plausible(altitude_m: float, ref_elev_m: float, config: AirfieldConfig) -> bool:
+    """Altitude check of the ground-contact rule (home and foreign airports).
+
+    True when the beacon altitude is within ``+-ground_max_agl_m`` of the
+    reference elevation ``ref_elev_m`` (home runway or foreign airport)
+    *and* is a real altitude (``> 0``). Beacons below the band are as
+    implausible as beacons above it: an aircraft 200 m under the runway is
+    not parked there, it is a beacon without usable altitude. See
+    "Typfilter, Ignorierliste, Beacon-Plausibilitaet" in
+    docs/dev-guides/implement-flight-logic.md.
+
+    Args:
+        altitude_m: Beacon altitude MSL.
+        ref_elev_m: Elevation of the ground the aircraft is checked
+            against - ``config.elevation_m`` at home, the airport's
+            elevation elsewhere (never the home field for a foreign one).
+        config: Airfield config (``ground_max_agl_m``).
+    """
+    # Relay beacons without altitude carry 0 m; at a reference at or below
+    # sea level 0 m is a real altitude, so only require > 0 above sea level.
+    altitude_ok = altitude_m > 0 or ref_elev_m <= 0
+    return altitude_ok and abs(altitude_agl(altitude_m, ref_elev_m)) < config.ground_max_agl_m
 
 
 def _bounded_put(d: dict, key: str, value: Any, max_entries: int) -> None:
@@ -775,8 +806,14 @@ class FlightStateMachine:
         # Use this single beacon's speed/AGL to decide ground contact;
         # the rolling buffer is only used for the takeoff trigger so a
         # single GPS speed glitch cannot fire takeoff prematurely.
-        is_on_ground = (beacon.speed < config.ground_speed_max_kmh
-                        and agl_af < config.ground_max_agl_m)
+        # Ground = within +-ground_max_agl_m of the runway (GPS noise puts
+        # a parked glider a few tens of metres *below* the field as often
+        # as above it) AND a real altitude: ADS-B relay beacons without
+        # position data carry altitude 0 / speed 0 and would otherwise
+        # count as "parked" (far below the field) and later "take off"
+        # once the real data arrives at 11 000 m.
+        is_on_ground = _ground_plausible(beacon.altitude, config.elevation_m, config) and \
+            beacon.speed < config.ground_speed_max_kmh
         if is_on_ground:
             entry = gc.get(beacon.flarm_id)
             if entry is None:
@@ -930,7 +967,8 @@ class FlightStateMachine:
             ref_elev = entry["ref_elev"]
             agl_ap = altitude_agl(beacon.altitude, ref_elev)
             entry["last_seen"] = now_mono
-            if beacon.speed < config.ground_speed_max_kmh and agl_ap < config.ground_max_agl_m:
+            if (beacon.speed < config.ground_speed_max_kmh
+                    and _ground_plausible(beacon.altitude, ref_elev, config)):
                 entry["speeds"].append(beacon.speed)
                 entry["fast_since_ts"] = 0.0
                 entry["fast_count"] = 0
@@ -959,8 +997,8 @@ class FlightStateMachine:
         # Ground reference: the airport elevation; without one, the
         # altitude of this (slow) beacon is the best available guess.
         ref_elev = airport.elevation_m if airport.elevation_m is not None else beacon.altitude
-        if altitude_agl(beacon.altitude, ref_elev) >= config.ground_max_agl_m:
-            return  # slow but well above the airport (thermalling overhead)
+        if not _ground_plausible(beacon.altitude, ref_elev, config):
+            return  # slow but well above / below the airport, or no altitude data
         fg = self._foreign_ground.setdefault(slug, {})
         entry = {
             "first_seen": now_mono,

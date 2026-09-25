@@ -48,6 +48,9 @@ log = structlog.get_logger()
 # Shutdown flag
 shutdown_event = asyncio.Event()
 
+# Periodic airfield config reload (also triggered early by TRACKER_CONFIG_CHANNEL)
+CONFIG_RELOAD_INTERVAL_S = 300
+
 
 def handle_signal(sig, frame):
     """Handle SIGINT/SIGTERM for graceful shutdown."""
@@ -55,11 +58,31 @@ def handle_signal(sig, frame):
     shutdown_event.set()
 
 
+async def load_ignored_aircraft(db) -> dict:
+    """Per-airfield ignore list: airfield_id -> frozenset of FLARM-IDs (uppercase).
+
+    Table ``airfield_ignored_aircraft`` (migration 012). A DB error yields
+    an empty mapping (logged) so a broken table never stops the worker.
+    """
+    try:
+        rows = await db.fetch(
+            "SELECT airfield_id, flarm_id FROM airfield_ignored_aircraft"
+        )
+    except Exception:
+        log.exception("ignored_aircraft_load_failed")
+        return {}
+    by_airfield: dict = {}
+    for row in rows:
+        by_airfield.setdefault(row["airfield_id"], set()).add(row["flarm_id"].upper())
+    return {k: frozenset(v) for k, v in by_airfield.items()}
+
+
 async def load_airfield_configs() -> dict:
     """Load active airfield configurations from PostgreSQL."""
     from app.tracking.flight_state_machine import AirfieldConfig
 
     db = get_db()
+    ignored = await load_ignored_aircraft(db)
     rows = await db.fetch(
         "SELECT id, slug, name, latitude, longitude, elevation_m, "
         "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, "
@@ -111,10 +134,71 @@ async def load_airfield_configs() -> dict:
             visitor_zone_km=settings.visitor_zone_km,
             visitor_max_agl_m=settings.visitor_max_agl_m,
             foreign_ground_max_entries=settings.foreign_ground_max_entries,
+            ignored_flarm_ids=ignored.get(row["id"], frozenset()),
         )
 
-    log.info("airfield_configs_loaded", count=len(configs))
+    log.info(
+        "airfield_configs_loaded",
+        count=len(configs),
+        ignored_aircraft=sum(len(c.ignored_flarm_ids) for c in configs.values()),
+    )
     return configs
+
+
+async def _close_pubsub(pubsub, channel: str) -> None:
+    """Unsubscribe + close a PubSub object, tolerating sync/async fakes and errors."""
+    import inspect
+
+    for step in (lambda: pubsub.unsubscribe(channel), pubsub.close):
+        try:
+            result = step()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # pragma: no cover - best effort on shutdown
+            log.debug("tracker_config_listener_close_failed", exc_info=True)
+
+
+async def tracker_config_listener(redis, reload, channel: str | None = None,
+                                  reconnect_delay_s: float = 5.0) -> None:
+    """Reload the airfield configs as soon as a ``tracker:config`` message arrives.
+
+    The API publishes the airfield slug after every ignore-list change
+    (``app.api.ignored_aircraft``). ``reload`` is the coroutine function
+    the periodic loop uses as well. Same subscribe/reconnect/cancel
+    behaviour as the VF-Sync ``config_change_listener``: one failing
+    reload never stops the listener, a Redis error re-subscribes after
+    ``reconnect_delay_s``.
+    """
+    from app.tracking.redis_keys import TRACKER_CONFIG_CHANNEL
+
+    channel = channel or TRACKER_CONFIG_CHANNEL
+    while True:
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+            log.info("tracker_config_listener_started", channel=channel)
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                payload = message.get("data")
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8", "replace")
+                log.info("tracker_config_reload_triggered", payload=payload)
+                try:
+                    await reload()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("tracker_config_reload_failed", payload=payload)
+            log.warning("tracker_config_listener_stream_ended", retry_in_s=reconnect_delay_s)
+        except asyncio.CancelledError:
+            log.info("tracker_config_listener_stopping")
+            raise
+        except Exception:
+            log.exception("tracker_config_listener_error", retry_in_s=reconnect_delay_s)
+        finally:
+            await _close_pubsub(pubsub, channel)
+        await asyncio.sleep(reconnect_delay_s)
 
 
 async def main():
@@ -296,43 +380,63 @@ async def main():
             name="ddb_sync",
         ))
 
-        # Periodic airfield config reload (every 5 min)
+        # Airfield config reload: periodic (every 5 min) and on demand via
+        # the tracker:config channel (API ignore-list changes). Both paths
+        # share one function and a lock so they never interleave.
+        reload_lock = asyncio.Lock()
+
+        async def reload_configs() -> None:
+            async with reload_lock:
+                new_configs = await load_airfield_configs()
+                flight_tracker.set_configs(new_configs)
+                # Ignore-list changes take effect now, not on the next
+                # beacon / timeout check
+                await flight_tracker.evict_ignored_flights()
+                # New / moved airfields get their terrain cache warmed
+                # (already warmed centres are skipped by the service)
+                if settings.terrain_agl_enabled:
+                    spawn_warmup(new_configs)
+                # Airports around new airfields / freshly imported rows
+                await airports.load_for_airfields(new_configs)
+
+                # Rebuild APRS filters if airfields changed
+                new_filter_airfields = [
+                    AirfieldPosition(
+                        slug=slug,
+                        latitude=cfg.latitude,
+                        longitude=cfg.longitude,
+                        radius_km=cfg.ogn_filter_radius_km,
+                    )
+                    for slug, cfg in new_configs.items()
+                ]
+                new_filters = build_filters(new_filter_airfields)
+                if new_filters and new_filters != aprs_filters:
+                    await aprs_client.update_filters(new_filters)
+
         async def config_reload_loop():
             while not shutdown_event.is_set():
                 try:
-                    await asyncio.wait_for(shutdown_event.wait(), timeout=300)
+                    await asyncio.wait_for(
+                        shutdown_event.wait(), timeout=CONFIG_RELOAD_INTERVAL_S
+                    )
                     break
                 except asyncio.TimeoutError:
                     pass
                 try:
-                    new_configs = await load_airfield_configs()
-                    flight_tracker.set_configs(new_configs)
-                    # New / moved airfields get their terrain cache warmed
-                    # (already warmed centres are skipped by the service)
-                    if settings.terrain_agl_enabled:
-                        spawn_warmup(new_configs)
-                    # Airports around new airfields / freshly imported rows
-                    await airports.load_for_airfields(new_configs)
-
-                    # Rebuild APRS filters if airfields changed
-                    new_filter_airfields = [
-                        AirfieldPosition(
-                            slug=slug,
-                            latitude=cfg.latitude,
-                            longitude=cfg.longitude,
-                            radius_km=cfg.ogn_filter_radius_km,
-                        )
-                        for slug, cfg in new_configs.items()
-                    ]
-                    new_filters = build_filters(new_filter_airfields)
-                    if new_filters and new_filters != aprs_filters:
-                        await aprs_client.update_filters(new_filters)
+                    await reload_configs()
                 except Exception:
                     log.exception("config_reload_failed")
 
         tasks.append(asyncio.create_task(
             config_reload_loop(),
             name="config_reload",
+        ))
+
+        # Immediate reload on API signal (best effort; the periodic loop
+        # is the fallback when Redis PubSub is unavailable)
+        tasks.append(asyncio.create_task(
+            tracker_config_listener(redis, reload_configs),
+            name="config_listener",
         ))
 
         log.info(

@@ -259,9 +259,117 @@ Zweite ODbL-Auflage: keine Weitergabe von OGN-Daten, die aelter als 24 h
 sind. Deshalb ist `settings.track_retention_s` per Validator auf 86400 s
 begrenzt (`config.py`).
 
+## Typfilter, Ignorierliste, Beacon-Plausibilitaet
+
+Motivation (Produktivdaten Ohlstadt): Rettungshubschrauber der Klinik
+nebenan (z. B. D-HYAU, ADS-B-Adresstyp "I") schweben langsam ueber den
+Platz und wurden als Heimatfluege geloggt; per ADS-B-Relay empfangene
+Verkehrsflugzeuge (ICAO 3E71D4, `max_distance_m` 500 km) bekamen einen
+"Start in Ohlstadt". Ursachen: keine Typfilterung, und Relay-Beacons mit
+Hoehe 0 / Speed 0 erfuellten die Bodenregel, weil `agl_af` stark negativ war.
+
+Alle drei Regeln werden - wie die DDB-Flags - an **einer** Stelle
+durchgesetzt: `FlightTracker.process_line` / `_process_beacon_for_airfield`
+(Worker), **vor** State Machine, Hot State, Track-Stream, Event und
+`flight_log`. Reihenfolge: Plausibilitaet -> `tracked = N` -> Typfilter ->
+Ignorierliste des Platzes.
+
+### Flugzeugkategorie (`app/tracking/aircraft_category.py`)
+
+`AircraftCategory` (GLIDER, TOW_PLANE, MOTOR_GLIDER, POWERED, ULTRALIGHT,
+HELICOPTER, PARAGLIDER_HANGGLIDER, PARACHUTE_DROP, BALLOON_AIRSHIP, UAV,
+STATIC, JET, UNKNOWN) normalisiert zwei Codierungen:
+
+| Quelle | Funktion | Hinweis |
+|---|---|---|
+| OGN-Beacon, Bits 5..2 des ID-Bytes (`Beacon.device_type`) | `category_from_ogn_type(int)` | 1 Segler, 2 Schlepper, 3 Hubschrauber, 4 Fallschirm, 5 Absetzer, 6 Haengegleiter, 7 Gleitschirm, 8 Motor, 9 Jet, 10 UFO, 11 Ballon, 12 Luftschiff, 13 UAV, 14 reserviert, 15 statisches Hindernis |
+| `tenant_aircraft.aircraft_type` / `aircraft_registry.aircraft_type` (String) | `category_from_ddb(str)` | `glider`, `tow_plane`, `motor_glider`, `tmg`, `helicopter`, `powered`, `ultralight`, ... (auch Enum-Werte, deutsche Bezeichnungen, numerischer OGN-Code) |
+
+**Achtung:** Die OGN-DDB hat *keine* Kategorie. Ihr `DEVICE_TYPE` (F / I / O)
+ist der **Adresstyp** (FLARM / ICAO / OGN-Tracker) und darf nie als Typ
+gelesen werden (`_parse_device_type` in `aircraft_resolver.py` ist eine
+Altlast: "I" wuerde "Schlepper" ergeben). `AircraftInfo.category` kommt aus
+dem Mandanten-`aircraft_type`, sonst aus `aircraft_registry.aircraft_type`
+(manuell pflegbar, von der DDB nie befuellt), sonst UNKNOWN.
+
+Aufloesung pro Beacon (`category_for_beacon`): Kategorie aus Mandant /
+Registry, wenn bekannt und nicht UNKNOWN - sonst der Beacon-Typ. Ein als
+Segler eingetragenes Flugzeug mit falsch konfiguriertem FLARM-Typ wird also
+verfolgt, ein Hubschrauber mit Beacon-Typ 0, den der Mandant als
+`helicopter` fuehrt, verworfen.
+
+### Typfilter (`settings.ignored_aircraft_categories`)
+
+Kommaliste von Enum-Werten, Default
+`helicopter,balloon_airship,uav,static,parachute_drop`; leer = kein Filter;
+unbekannte Namen und `unknown` werden beim Start abgelehnt
+(`parse_category_list`). Beacons einer ignorierten Kategorie werden fuer
+**alle** Plaetze verworfen wie `tracked = N`: kein State, kein Hot State,
+kein Track, kein Event, kein `flight_log`; ein laufender Flug wird beim
+naechsten Beacon bzw. in `check_timeouts()` evakuiert (Kategorie aus dem
+gespeicherten `flarm_aircraft_type`), beim Recovery aus Redis gepurgt.
+Zaehler `FlightTracker._drops["ignored_category"]`, Log
+`beacon_dropped_ignored_category` (debug, hoechstens einmal pro FLARM-ID
+und Stunde). Schlepper, Motorflugzeuge, Motorsegler und Jets bleiben
+verfolgt: sie landen auch mal am Platz und duerfen beim Ueberflug nicht
+verschwinden - Bodenkontakt bekommen sie dank der Plausibilitaetsregel
+ohnehin nicht.
+
+### Ignorierliste pro Platz (`airfield_ignored_aircraft`, Migration 012)
+
+| Route | Ergebnis |
+|---|---|
+| `GET /api/airfields/{id}/ignored-aircraft` | `[{id, flarmId, note, createdAt}]` |
+| `POST ...` Body `{flarm_id (4-16 hex, wird upper-cased), note?}` | 201 Item, 409 Duplikat, 422 ungueltig |
+| `DELETE .../{flarm_id}` | 204, 404 unbekannt |
+
+Auth + `_verify_airfield_ownership` wie die Aircraft-Routen (401 / 403 /
+404). Der Worker laedt die Liste mit den Platz-Configs
+(`worker.load_airfield_configs` -> `AirfieldConfig.ignored_flarm_ids`,
+frozenset, uppercase). Nach jedem erfolgreichen POST / DELETE publiziert
+die API den Slug auf dem Redis-Kanal `tracker:config`
+(`app/tracking/redis_keys.TRACKER_CONFIG_CHANNEL`); `worker.tracker_config_listener`
+loest sofort denselben Reload aus wie die 5-Minuten-Schleife (gemeinsamer
+`reload_configs()` + Lock). Best effort: ohne Redis bleibt der DB-Write
+gueltig, der periodische Reload holt die Aenderung nach. Der Tracker
+behandelt eine ID auf der Liste **nur fuer diesen Platz** wie
+`tracked = N` (laufender Flug: Hot State, Track, `flight_status` weg;
+`flight_log`-Historie bleibt); andere Plaetze verfolgen das Flugzeug
+weiter. Nach dem Reload evakuiert `evict_ignored_flights()` sofort, auch
+ohne weiteren Beacon.
+
+### Beacon-Plausibilitaet
+
+- `FlightTracker._is_implausible`: `altitude == 0 and speed == 0` (Relay
+  ohne Daten traegt **exakt** 0/0) -> Beacon wird vor allem anderen
+  verworfen (Zaehler `_drops["implausible"]`, Log
+  `beacon_dropped_implausible`). Bewusst kein `<= 0`: ein geparktes
+  Flugzeug an einem Platz auf Meereshoehe meldet durch GPS-Rauschen auch
+  mal -10 m bei 0 km/h und ist ein echter Beacon.
+- Bodenkontakt (State Machine, `_ground_plausible(altitude_m, ref_elev_m,
+  config)`, zu Hause **und** an fremden Plaetzen): die Referenzhoehe wird
+  explizit uebergeben - `config.elevation_m` zu Hause, die Hoehe des
+  fremden Platzes dort (nie die Heimathoehe). Regel:
+  `altitude_m > 0 or ref_elev_m <= 0` **und**
+  `abs(altitude_m - ref_elev_m) < ground_max_agl_m`. Das Band ist
+  symmetrisch: 30 m *unter* der Platzhoehe (GPS-Rauschen) gilt weiter als
+  Boden, 200 m darunter nicht mehr - so wenig wie 200 m darueber. Auf
+  Meereshoehe (Referenz <= 0 m) ist 0 m eine echte Hoehe.
+- Die Drop-Zaehler (`_drops[reason]`, `_drops_logged_at[reason]`,
+  `_untracked_drops`, `_untracked_logged_at`, Key = FLARM-ID) sind ueber
+  `_bounded_put` auf `DROP_COUNTER_MAX_ENTRIES` (20 000) Eintraege
+  begrenzt - jedes Geraet im APRS-Radius landet dort, sonst wachsen sie
+  ueber die Prozesslaufzeit unbegrenzt. Aelteste Eintraege fliegen zuerst.
+
+Tests: `app/tests/test_aircraft_category.py`, `test_aircraft_resolver.py`
+(Kategorie-Merge), `test_flight_tracker.py` (Typfilter, Ignorierliste,
+Plausibilitaet), `test_beacon_plausibility.py` (State Machine),
+`tests/api/test_ignored_aircraft_api.py`, `test_worker_config.py`.
+
 ## Checkliste
 - [ ] feature.md gelesen fuer die relevante Section
 - [ ] DDB-Flags `tracked`/`identified` respektiert (siehe oben) - keine neue Stelle, die Beacons am FlightTracker vorbei verarbeitet
+- [ ] Typfilter / Ignorierliste / Plausibilitaet nicht umgangen (Choke Point `FlightTracker`); Typ nur ueber `AircraftCategory`, nie ueber den DDB-Adresstyp
 - [ ] Code lebt in app/tracking/ (nicht in app/api/)
 - [ ] In-Memory State, keine DB-Queries im Hot Path
 - [ ] Redis HSET + PUBLISH nach jedem State Update

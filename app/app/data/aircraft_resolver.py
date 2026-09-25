@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import structlog
 
 from app.db.connection import get_db
+from app.tracking.aircraft_category import AircraftCategory, category_from_ddb
 
 log = structlog.get_logger()
 
@@ -57,6 +58,10 @@ class AircraftInfo:
     identified: bool         # False = show the FLARM-ID only (no reg / CN)
     # Launch-detection role: towplane / glider / motorglider_sl / powered / ""
     role: str = ""
+    # Normalised category (tenant aircraft_type / registry aircraft_type);
+    # UNKNOWN for plain DDB rows - the DDB has no category, only the
+    # address type letter. See app/tracking/aircraft_category.py.
+    category: AircraftCategory = AircraftCategory.UNKNOWN
 
 
 def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping],
@@ -70,10 +75,15 @@ def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping]
     * ``identified = FALSE`` blanks registration and competition sign.
     * a tenant row overrides the registry data (explicit consent for the
       tenant's own fleet) but inherits ``tracked``: the DDB opt-out wins.
+    * ``category``: the tenant ``aircraft_type`` when it maps to a known
+      category, else the registry ``aircraft_type`` (optional column),
+      else UNKNOWN. The DDB address type (``device_type`` F/I/O) is not a
+      category and is never used for it.
 
     Args:
         registry_rows: rows with device_id, registration, aircraft_model,
-            competition_sign, device_type, source, tracked, identified.
+            competition_sign, device_type, source, tracked, identified
+            (optional: aircraft_type).
         tenant_rows: rows with flarm_id, registration, aircraft_model,
             competition_sign, aircraft_type, role.
 
@@ -96,6 +106,7 @@ def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping]
             source=row["source"] or "ogn_ddb",
             tracked=tracked,
             identified=identified,
+            category=category_from_ddb(_row_get(row, "aircraft_type")),
         )
 
     # 2. Tenant-specific aircraft (override global entries, keep the
@@ -104,6 +115,9 @@ def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping]
     for row in tenant_rows:
         fid = row["flarm_id"].upper()
         prev = cache.get(fid)
+        category = category_from_ddb(row["aircraft_type"])
+        if category is AircraftCategory.UNKNOWN and prev is not None:
+            category = prev.category
         cache[fid] = AircraftInfo(
             flarm_id=fid,
             registration=row["registration"] or "",
@@ -114,9 +128,18 @@ def build_cache(registry_rows: Iterable[Mapping], tenant_rows: Iterable[Mapping]
             tracked=prev.tracked if prev is not None else True,
             identified=True,
             role=role_from_row(row["role"], row["aircraft_type"]),
+            category=category,
         )
 
     return cache
+
+
+def _row_get(row: Mapping, key: str):
+    """Optional column of an asyncpg Record / dict (None when missing)."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
 
 
 class AircraftResolver:
@@ -188,7 +211,7 @@ class AircraftResolver:
 
         registry_rows = await db.fetch(
             "SELECT device_id, registration, aircraft_model, "
-            "competition_sign, device_type, source, tracked, identified "
+            "competition_sign, device_type, aircraft_type, source, tracked, identified "
             "FROM aircraft_registry"
         )
         tenant_rows = await db.fetch(
@@ -231,7 +254,13 @@ class AircraftResolver:
 
 
 def _parse_device_type(dt: str | None) -> int:
-    """Convert DDB device type char to integer."""
+    """Convert DDB device type char to integer (legacy ``aircraft_type``).
+
+    Note: the DDB ``DEVICE_TYPE`` is the *address* type (F = FLARM,
+    I = ICAO, O = OGN tracker), not an aircraft category. The integer is
+    kept for backwards compatibility only; use ``AircraftInfo.category``
+    for anything type related.
+    """
     if not dt:
         return 0
     mapping = {"F": 1, "I": 2, "O": 3}

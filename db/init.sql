@@ -158,6 +158,25 @@ CREATE INDEX idx_tenant_aircraft_airfield ON tenant_aircraft(airfield_id);
 CREATE INDEX idx_tenant_aircraft_flarm ON tenant_aircraft(flarm_id);
 
 -- =============================================
+-- AIRFIELD IGNORED AIRCRAFT (Ignorierliste pro Platz, Migration 012)
+-- Kept in sync with db/migrations/012_airfield_ignored_aircraft.sql
+-- =============================================
+-- FLARM-IDs that are never tracked at THIS airfield (rescue helicopter of
+-- the clinic next door, ...). Managed via /api/airfields/{id}/ignored-aircraft,
+-- loaded by the worker into AirfieldConfig.ignored_flarm_ids.
+CREATE TABLE IF NOT EXISTS airfield_ignored_aircraft (
+    id           UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    airfield_id  UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
+    flarm_id     VARCHAR(16) NOT NULL,
+    note         VARCHAR(120),
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (airfield_id, flarm_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_airfield_ignored_aircraft_airfield
+    ON airfield_ignored_aircraft (airfield_id);
+
+-- =============================================
 -- AIRCRAFT REGISTRY (OGN DDB + FlarmNet)
 -- =============================================
 CREATE TABLE aircraft_registry (
@@ -166,7 +185,7 @@ CREATE TABLE aircraft_registry (
     registration            VARCHAR(16),
     competition_sign        VARCHAR(4),
     aircraft_model          VARCHAR(64),
-    aircraft_type           VARCHAR(32),
+    aircraft_type           VARCHAR(32),  -- optional category (app/tracking/aircraft_category.py); NULL from the DDB
     tracked                 BOOLEAN DEFAULT TRUE,
     identified              BOOLEAN DEFAULT TRUE,
     source                  VARCHAR(16) DEFAULT 'ogn_ddb',  -- 'ogn_ddb', 'flarmnet'

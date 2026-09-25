@@ -113,3 +113,51 @@ def test_aprs_registration_is_used_for_unknown_device():
     assert info is not None
     assert info.registration == "D-APRS" and info.source == "aprs"
     assert info.tracked is True and info.identified is True
+
+
+# ---------------------------------------------------------------------------
+# category (app/tracking/aircraft_category.py)
+# ---------------------------------------------------------------------------
+
+def test_plain_ddb_row_has_unknown_category():
+    """The DDB carries no category; its device_type letter is an address type."""
+    from app.tracking.aircraft_category import AircraftCategory as C
+
+    for letter in ("F", "I", "O"):
+        info = build_cache([registry_row(device_type=letter)], [])[FID]
+        assert info.category is C.UNKNOWN
+
+
+def test_registry_aircraft_type_column_is_optional_and_honoured():
+    from app.tracking.aircraft_category import AircraftCategory as C
+
+    # rows without the column (older SELECTs / tests) still build
+    assert build_cache([registry_row()], [])[FID].category is C.UNKNOWN
+    info = build_cache([registry_row(aircraft_type="helicopter")], [])[FID]
+    assert info.category is C.HELICOPTER
+
+
+def test_tenant_aircraft_type_sets_category_and_overrides_registry():
+    from app.tracking.aircraft_category import AircraftCategory as C
+
+    info = build_cache([registry_row(aircraft_type="helicopter")],
+                       [tenant_row(aircraft_type="glider")])[FID]
+    assert info.category is C.GLIDER
+    assert build_cache([], [tenant_row(aircraft_type="tmg")])[FID].category is C.MOTOR_GLIDER
+
+
+def test_tenant_row_without_usable_type_inherits_registry_category():
+    from app.tracking.aircraft_category import AircraftCategory as C
+
+    info = build_cache([registry_row(aircraft_type="helicopter")],
+                       [tenant_row(aircraft_type=None, role=None)])[FID]
+    assert info.category is C.HELICOPTER
+    assert build_cache([], [tenant_row(aircraft_type=None, role=None)])[FID].category is C.UNKNOWN
+
+
+def test_aprs_only_entry_has_unknown_category():
+    from app.tracking.aircraft_category import AircraftCategory as C
+
+    resolver = AircraftResolver()
+    resolver.update_from_aprs("UNKNW2", "D-APRS")
+    assert resolver.resolve("UNKNW2").category is C.UNKNOWN

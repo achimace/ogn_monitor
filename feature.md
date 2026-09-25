@@ -456,6 +456,21 @@ CREATE TABLE tenant_aircraft (
     UNIQUE(tenant_id, flarm_id)
 );
 
+-- Ignorierliste pro Flugplatz (Migration 012): FLARM-IDs, die an DIESEM
+-- Platz nie verfolgt werden (Rettungshubschrauber der Klinik nebenan, ...).
+-- API: /api/airfields/{id}/ignored-aircraft; der Worker laedt die Liste mit
+-- den Platz-Configs (AirfieldConfig.ignored_flarm_ids) und wird nach jeder
+-- Aenderung ueber den Redis-Kanal tracker:config sofort neu geladen.
+-- Andere Plaetze sind nicht betroffen, flight_log-Historie bleibt.
+CREATE TABLE airfield_ignored_aircraft (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    airfield_id     UUID NOT NULL REFERENCES airfields(id) ON DELETE CASCADE,
+    flarm_id        VARCHAR(16) NOT NULL,             -- uppercase hex
+    note            VARCHAR(120),
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(airfield_id, flarm_id)
+);
+
 -- Benutzer (optional, fuer Multi-User pro Mandant)
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2718,6 +2733,12 @@ SMTP_PASS=<smtp-passwort>
 # Anwendung
 BASE_URL=https://flightmonitor.example.com
 LOG_LEVEL=info
+
+# Tracking: Flugzeugkategorien, deren Beacons der Worker komplett verwirft
+# (app/tracking/aircraft_category.py; Kategorie aus Mandanten-Flotte /
+# Registry, sonst aus dem Typ im OGN-Beacon). Leer = kein Filter.
+# Schlepper, Motorflugzeuge, Motorsegler und Jets bleiben verfolgt.
+IGNORED_AIRCRAFT_CATEGORIES=helicopter,balloon_airship,uav,static,parachute_drop
 
 # Skalierung
 API_WORKERS=4

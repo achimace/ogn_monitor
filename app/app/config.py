@@ -3,6 +3,8 @@
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
+from app.tracking.aircraft_category import parse_category_list
+
 # OGN data usage policy (https://www.glidernet.org/ogn-data-usage/):
 # "You do not re-distribute OGN data older than 24 hours". The per-aircraft
 # track stream is served to browsers via the API, so its retention may
@@ -134,6 +136,25 @@ class Settings(BaseSettings):
     # visitor-candidate dicts (oldest entries are evicted).
     foreign_ground_max_entries: int = 5000
 
+    # Aircraft type filter (app/tracking/aircraft_category.py): beacons of
+    # these categories are dropped by the FlightTracker before any state /
+    # hot state / track / flight_log write - rescue helicopters hovering
+    # over the field, balloons, drones, static obstacles, skydivers. The
+    # category comes from the tenant fleet / registry when known, else
+    # from the type bits of the beacon. Comma separated enum values; empty
+    # = no filter. Tow planes, motor gliders, powered aircraft and jets
+    # stay tracked (they may land here / must stay visible when overflying).
+    # See docs/dev-guides/implement-flight-logic.md "Typfilter, Ignorierliste,
+    # Beacon-Plausibilitaet".
+    ignored_aircraft_categories: str = "helicopter,balloon_airship,uav,static,parachute_drop"
+
+    @field_validator("ignored_aircraft_categories")
+    @classmethod
+    def _ignored_categories_are_known(cls, value: str) -> str:
+        """Reject unknown category names early (worker start), keep the string."""
+        parse_category_list(value)
+        return value
+
     # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
     vfsync_enabled: bool = False
     vfsync_cred_key: str = ""            # Fernet key (base64) for vf_sync_config credentials
@@ -155,6 +176,10 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
     }
+
+    def ignored_categories(self):
+        """The parsed ``ignored_aircraft_categories`` (frozenset of AircraftCategory)."""
+        return parse_category_list(self.ignored_aircraft_categories)
 
 
 settings = Settings()

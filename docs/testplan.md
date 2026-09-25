@@ -173,6 +173,7 @@ Wichtige Optionen: `--type winch|self|powered`, `--touch-go N`,
 | A-06 | CSV ohne Kopfzeile / mit Semikolon / falsche Endung | Varianten importieren | Kopfzeile optional; `.txt` wird abgelehnt; unbrauchbare Zeilen gemeldet |
 | A-07 | Rolle für VF-Sync (V1 per SQL) | `UPDATE tenant_aircraft SET role='towplane' WHERE flarm_id='DDC222';` | Worker-Log nach ≤ 1 h (oder Neustart) `aircraft_cache_reloaded`; Schlepper wird a priori „Motor“ (T-15) |
 | A-08 | Auflösung im Monitor | Flugzeug aus A-01 fliegt (Kap. 6) | Monitor zeigt Kennzeichen/WB-Kz./Typ statt nur FLARM-ID |
+| A-09 | Ignorierliste | `POST /api/airfields/<id>/ignored-aircraft` mit `{"flarm_id": "3e0abc", "note": "Rettungsheli"}` (bzw. UI „Ignorieren“); danach `GET …/ignored-aircraft`; dieselbe ID erneut; `DELETE …/ignored-aircraft/3E0ABC`; unbekannte ID löschen; `ZZZZ` anlegen; fremder Mandant; ohne Login | 201 mit `flarmId = "3E0ABC"` (upper-cased), `note`, `createdAt`; Liste enthält den Eintrag; Duplikat → 409; DELETE → 204, danach Liste leer; unbekannt → 404; `ZZZZ` → 422; fremder Platz → 403; ohne Login → 401. Worker-Log innerhalb weniger Sekunden `tracker_config_reload_triggered` + `airfield_configs_loaded` (`ignored_aircraft` = Anzahl); ein laufender Flug dieser ID verschwindet sofort aus dem Monitor (`flight_evicted_untracked`, `reason = airfield_ignored`), sein Flugbuch-Verlauf bleibt; an einem zweiten Platz wird die ID weiter verfolgt |
 
 ---
 
@@ -213,6 +214,7 @@ einen Platz mit regelmäßigem Betrieb konfigurieren).
 | T-26 | Landung an fremdem Platz | Vorbedingung: `import_airports` gelaufen (DEPLOYMENT 9b). Flugzeug landet auf einem bekannten Platz (z. B. Unterwössen), nicht zu Hause | **Keine** AUSSENLANDUNG: Wechsel nach GELANDET mit `landingType = foreign`, `landingAirfield = "Unterwoessen Airfield (EDPU)"`; Flugbuch-Eintrag Status `foreign`, Landeort gefüllt; startet es dort wieder, neuer Flug mit Startort = dieser Platz |
 | T-27 | Rückkehr nach Außenlandung | Motorsegler landet außen (kein bekannter Platz, > 5 min), fliegt weiter und landet zu Hause | AUSSENLANDUNG wird als eigener Flug ins Flugbuch geschrieben (Landezeit = Beginn des Verdachts, Status `outlanding`); ein **neuer** Flug (Startort „Feld“, Startzeit = erster Luft-Beacon) erscheint unter FLIEGEND und landet normal zu Hause (`landingType = home`); kein Flug bleibt als Status 4 am Platz stehen |
 | T-28 | Besucher | Fremdes Flugzeug startet an bekanntem Platz (< 300 km) und landet zu Hause; alternativ ein Flugzeug ohne Bodenkontakt in der 15-km-Zone | Beim Einflug in die 15-km-Zone erscheint es als Besucher (`isVisitor`, Startort + Startzeit bzw. „unbekannt“, Toast „Besucher aus …“); Landung → GELANDET (`landingType = home`), Flugbuch mit Startort; fliegt es ohne Landung wieder weg (> 18 km) oder verstummt es, verschwindet es **ohne** Alarm und ohne Flugbuch-Eintrag |
+| T-29 | Hubschrauber wird nicht geloggt | Rettungshubschrauber (OGN-Typ 3 im Beacon oder in der Flotte als `helicopter` eingetragen) schwebt langsam über dem Platz und landet an der Klinik nebenan; alternativ ein Beacon-Replay mit Typ 3. Zusätzlich ein per ADS-B-Relay empfangenes Verkehrsflugzeug (erste Beacons Höhe 0 / Speed 0, dann 11 000 m / 800 km/h) | Hubschrauber erscheint **nie** im Monitor (weder FLIEGEND noch GELANDET), kein Flugbuch-Eintrag, Worker-Log `beacon_dropped_ignored_category` (debug, `category = helicopter`, max. 1×/h je ID); Verkehrsflugzeug bekommt keinen Start in Ohlstadt (Log `beacon_dropped_implausible`), kein Flugbuch-Eintrag mit `max_distance_m` > 200 km; ein Segler am Platz startet weiterhin normal (T-07). Mit `IGNORED_AIRCRAFT_CATEGORIES=` (leer) und Worker-Neustart wird der Hubschrauber wieder verfolgt |
 
 ---
 
@@ -334,8 +336,8 @@ Mock **exakt** wie beim Simulator (`--registration`).
 ```
 docker compose run --rm --no-deps -v "$PWD/app:/app" api pytest -q -p no:cacheprovider
 ```
-Erwartet: alle Tests grün (Stand: 369 passed; `test_stores_pg`/`tests/api`
-brauchen die laufende Postgres, sonst werden sie übersprungen). Bei Fehlern: Ausgabe ins Protokoll, Test-ID
+Erwartet: alle Tests grün (`test_stores_pg`/`tests/api` brauchen die laufende
+Postgres, sonst werden sie übersprungen). Bei Fehlern: Ausgabe ins Protokoll, Test-ID
 nennen. CI (GitHub Actions) führt dieselbe Suite plus Secret-Scan aus.
 
 ---
