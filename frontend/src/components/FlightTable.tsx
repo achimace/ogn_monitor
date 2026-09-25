@@ -14,11 +14,27 @@ import { ALL_STRIP_FIELDS } from '../store/monitorStore'
 
 interface FlightTableProps {
   flights: Flight[]
+  /** Row click (used when no onFocus is given) – opens the detail drawer. */
   onSelect?: (flight: Flight) => void
+  /** Row click in split view – focuses the aircraft on the map instead of onSelect. */
+  onFocus?: (flight: Flight) => void
+  /** When given, every row shows a small "Details" button that calls this. */
+  onDetails?: (flight: Flight) => void
+  /** FLARM ID of the aircraft currently focused on the map (subtle highlight). */
+  focusedFlarmId?: string
   stripFields?: StripField[]
 }
 
-export default function FlightTable({ flights, onSelect, stripFields }: FlightTableProps) {
+/** Callbacks + highlight state shared by every section/row. */
+interface RowHandlers {
+  onSelect?: (f: Flight) => void
+  onFocus?: (f: Flight) => void
+  onDetails?: (f: Flight) => void
+  focusedFlarmId?: string
+}
+
+export default function FlightTable({ flights, onSelect, onFocus, onDetails, focusedFlarmId, stripFields }: FlightTableProps) {
+  const handlers: RowHandlers = { onSelect, onFocus, onDetails, focusedFlarmId }
   const fields = new Set<StripField>(stripFields && stripFields.length > 0
     ? stripFields
     : ALL_STRIP_FIELDS)
@@ -44,25 +60,25 @@ export default function FlightTable({ flights, onSelect, stripFields }: FlightTa
   return (
     <div className="space-y-3">
       {emergency.length > 0 && (
-        <FlightSection title="NOTFALL" count={emergency.length} flights={emergency} color="red" blink onSelect={onSelect} show={show} />
+        <FlightSection title="NOTFALL" count={emergency.length} flights={emergency} color="red" blink handlers={handlers} show={show} />
       )}
       {alarm.length > 0 && (
-        <FlightSection title="ALARM" count={alarm.length} flights={alarm} color="red" onSelect={onSelect} show={show} />
+        <FlightSection title="ALARM" count={alarm.length} flights={alarm} color="red" handlers={handlers} show={show} />
       )}
       {signalLost.length > 0 && (
-        <FlightSection title="KEIN SIGNAL" count={signalLost.length} flights={signalLost} color="yellow" onSelect={onSelect} show={show} />
+        <FlightSection title="KEIN SIGNAL" count={signalLost.length} flights={signalLost} color="yellow" handlers={handlers} show={show} />
       )}
       {outlanding.length > 0 && (
-        <FlightSection title="AUSSENLANDUNG" count={outlanding.length} flights={outlanding} color="orange" onSelect={onSelect} show={show} />
+        <FlightSection title="AUSSENLANDUNG" count={outlanding.length} flights={outlanding} color="orange" handlers={handlers} show={show} />
       )}
       {towing.length > 0 && (
-        <FlightSection title="IM SCHLEPP" count={towing.length} flights={towing} color="yellow" onSelect={onSelect} show={show} />
+        <FlightSection title="IM SCHLEPP" count={towing.length} flights={towing} color="yellow" handlers={handlers} show={show} />
       )}
       {flying.length > 0 && (
-        <FlightSection title="FLIEGEND" count={flying.length} flights={flying} color="blue" onSelect={onSelect} show={show} />
+        <FlightSection title="FLIEGEND" count={flying.length} flights={flying} color="blue" handlers={handlers} show={show} />
       )}
       {landed.length > 0 && (
-        <FlightSection title="GELANDET" count={landed.length} flights={landed} color="green" onSelect={onSelect} show={show} />
+        <FlightSection title="GELANDET" count={landed.length} flights={landed} color="green" handlers={handlers} show={show} />
       )}
       {flights.length === 0 && (
         <div className="text-center text-gray-500 py-16 text-lg">
@@ -73,9 +89,9 @@ export default function FlightTable({ flights, onSelect, stripFields }: FlightTa
   )
 }
 
-function FlightSection({ title, count, flights, color, blink, onSelect, show }: {
+function FlightSection({ title, count, flights, color, blink, handlers, show }: {
   title: string; count: number; flights: Flight[]; color: string; blink?: boolean
-  onSelect?: (f: Flight) => void
+  handlers: RowHandlers
   show: (f: StripField) => boolean
 }) {
   const colorMap: Record<string, string> = {
@@ -108,7 +124,7 @@ function FlightSection({ title, count, flights, color, blink, onSelect, show }: 
             key={flight.flarmId}
             flight={flight}
             bgColor={bgMap[color] || ''}
-            onSelect={onSelect} show={show}
+            handlers={handlers} show={show}
           />
         ))}
       </div>
@@ -116,10 +132,11 @@ function FlightSection({ title, count, flights, color, blink, onSelect, show }: 
   )
 }
 
-function FlightRow({ flight, bgColor, onSelect, show }: {
-  flight: Flight; bgColor: string; onSelect?: (f: Flight) => void
+function FlightRow({ flight, bgColor, handlers, show }: {
+  flight: Flight; bgColor: string; handlers: RowHandlers
   show: (f: StripField) => boolean
 }) {
+  const { onSelect, onFocus, onDetails, focusedFlarmId } = handlers
   const takeoffStr = formatHM(flight.takeoffTime)
   const landingStr = formatHM(flight.landingTime)
   const durationStr = computeDurationShort(flight)
@@ -128,13 +145,31 @@ function FlightRow({ flight, bgColor, onSelect, show }: {
   const launchLabel = formatLaunchType(flight.launchType)
   const elapsedMin = flight.elapsedS > 0 ? Math.floor(flight.elapsedS / 60) : undefined
 
-  const handleClick = onSelect ? () => onSelect(flight) : undefined
-  const clickable = onSelect ? 'cursor-pointer hover:brightness-110' : ''
+  // Split view: the row click focuses the map (onFocus) and the drawer is
+  // reached via the "Details" button. Plain table view: row click = drawer.
+  const rowAction = onFocus || onSelect
+  const handleClick = rowAction ? () => rowAction(flight) : undefined
+  const clickable = rowAction ? 'cursor-pointer hover:brightness-110' : ''
+  const focused = focusedFlarmId !== undefined && focusedFlarmId === flight.flarmId
+  const focusRing = focused ? 'ring-1 ring-tower-qdr border-tower-qdr/60' : ''
+
+  // Stop propagation so the row click (focus) does not fire as well.
+  const detailsButton = onDetails ? (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onDetails(flight) }}
+      className="rounded border border-tower-border text-gray-400 hover:text-white hover:border-gray-500
+        text-xs px-2 py-1 transition-colors shrink-0"
+      title="Flugdetails anzeigen"
+    >
+      Details
+    </button>
+  ) : null
 
   return (
     <div
       onClick={handleClick}
-      className={`${bgColor} rounded-lg border border-tower-border/30 ${clickable} transition-all`}
+      className={`${bgColor} rounded-lg border border-tower-border/30 ${clickable} ${focusRing} transition-all`}
     >
       {/* ===== Mobile card layout (< md) ===== */}
       <div className="md:hidden p-3">
@@ -156,7 +191,10 @@ function FlightRow({ flight, bgColor, onSelect, show }: {
               ].filter(Boolean).join(' · ')}
             </div>
           </div>
-          <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+          <div className="flex flex-col items-end gap-1.5 shrink-0">
+            <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+            {detailsButton}
+          </div>
         </div>
         <div className="grid grid-cols-3 gap-2 text-center">
           <div>
@@ -227,8 +265,10 @@ function FlightRow({ flight, bgColor, onSelect, show }: {
           </div>
         )}
 
-        {/* Column 3: PRIMARY - QDR, Distance, Height */}
-        <div className="flex-1 flex items-center gap-6">
+        {/* Column 3: PRIMARY - QDR, Distance, Height.
+            min-w-0 lets the column shrink in the half-width split pane instead
+            of pushing the status column out of the visible area. */}
+        <div className="flex-1 min-w-0 flex items-center gap-3 lg:gap-6">
           {show('qdr') && (
             <div className="text-center">
               <div className="text-white font-mono font-bold text-tower-xl leading-none">
@@ -264,7 +304,7 @@ function FlightRow({ flight, bgColor, onSelect, show }: {
           )}
 
           {(show('speed') || show('vs') || show('track')) && (
-            <div className="text-gray-500 text-xs space-y-0.5 min-w-[120px]">
+            <div className="text-gray-500 text-xs space-y-0.5 whitespace-nowrap">
               {show('speed') && <div>{flight.speedKmh} km/h</div>}
               {(show('vs') || show('track')) && (
                 <div>
@@ -277,9 +317,11 @@ function FlightRow({ flight, bgColor, onSelect, show }: {
           )}
         </div>
 
-        {/* Column 4: Status */}
-        <div className="w-20 shrink-0 flex justify-center">
+        {/* Column 4: Status, with the Details button (split view only) stacked
+            underneath so the row keeps its width. */}
+        <div className="w-20 shrink-0 flex flex-col items-center gap-1">
           <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+          {detailsButton}
         </div>
       </div>
     </div>

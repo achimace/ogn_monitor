@@ -6,20 +6,28 @@
  * - Color coding: blue=flying, green=landed, red=alarm, orange=outlanding
  * - Home airfield marker with 800m radius circle
  * - QDR line from home to each aircraft (dashed, with degree label)
- * - Flight trail of last 60 minutes (height-colored)
+ * - Focus on one aircraft (split view): center + zoom, follow while it moves
+ * - 24 h flight track of the focused aircraft (stored points + live beacons)
  * - Alarm: pulsing red circle at last position
  * - Auto-zoom to fit all active flights
  */
 import { useEffect, useRef, useState } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import type { Flight } from '../types/flight'
+import type { Flight, TrackPoint } from '../types/flight'
+import { fetchTrack } from '../api/monitor'
 
 interface MapViewProps {
   flights: Flight[]
   airfieldLat?: number
   airfieldLng?: number
   airfieldName?: string
+  /** Needed to load the stored track of the focused aircraft. */
+  airfieldSlug?: string
+  /** FLARM ID of the aircraft to center on and follow (split view). */
+  focusFlarmId?: string | null
+  /** Called when the user leaves focus mode via "Zurück zur Übersicht". */
+  onClearFocus?: () => void
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -36,7 +44,32 @@ const STATUS_COLORS: Record<string, string> = {
   emergency: '#ff0040',
 }
 
-export default function MapView({ flights, airfieldLat, airfieldLng, airfieldName }: MapViewProps) {
+/** Minimum zoom when focusing an aircraft. */
+const FOCUS_ZOOM = 13
+/** Hours of stored track to load for the focused aircraft. */
+const TRACK_HOURS = 24
+/** Consecutive track points further apart than this start a new line segment. */
+const TRACK_GAP_MS = 10 * 60 * 1000
+/**
+ * Minimum spacing between live points appended to the track. The backend
+ * stream is thinned to one point per 5 s; beacons arrive every 1-4 s, so
+ * without this the live part would be denser than the stored one and the
+ * whole GeoJSON would be re-serialised on every beacon.
+ */
+const TRACK_LIVE_MIN_INTERVAL_MS = 5000
+/** Age limit for in-memory track points, mirrors TRACK_HOURS. */
+const TRACK_MAX_AGE_MS = TRACK_HOURS * 60 * 60 * 1000
+/** Fallback track color when the focused flight has no status color. */
+const TRACK_FALLBACK_COLOR = '#38bdf8'
+
+type TrackInfo =
+  | { state: 'loading' }
+  | { state: 'loaded'; count: number; hours: number }
+  | { state: 'error' }
+
+export default function MapView({
+  flights, airfieldLat, airfieldLng, airfieldName, airfieldSlug, focusFlarmId, onClearFocus,
+}: MapViewProps) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
@@ -47,6 +80,22 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
   // Distinguishes our own programmatic fitBounds from real user moves so
   // moveend handlers don't accidentally flip userInteracted on.
   const programmaticMoveRef = useRef(false)
+
+  // --- Focus / track state (only used while focusFlarmId is set) ---
+  // Latest flights list, readable from the focus effect without making it
+  // re-run on every beacon update.
+  const flightsRef = useRef<Flight[]>(flights)
+  flightsRef.current = flights
+  // In-memory track of the focused aircraft: stored points from the API plus
+  // live positions appended from the flights prop.
+  const trackPointsRef = useRef<TrackPoint[]>([])
+  // Live points collected while the stored track is still loading.
+  const pendingLiveRef = useRef<TrackPoint[]>([])
+  const trackLoadedRef = useRef(false)
+  // Last live position we appended – avoids duplicate points on non-position deltas.
+  const lastLivePosRef = useRef<{ lat: number; lon: number } | null>(null)
+  const trackAbortRef = useRef<AbortController | null>(null)
+  const [trackInfo, setTrackInfo] = useState<TrackInfo | null>(null)
 
   // Initialize map
   useEffect(() => {
@@ -121,6 +170,24 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
         },
       })
 
+      // Track of the focused aircraft. Aircraft markers are HTML markers and
+      // therefore always render above style layers – the line stays below them.
+      map.addSource('track-line', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      })
+      map.addLayer({
+        id: 'track-line',
+        type: 'line',
+        source: 'track-line',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': 2.5,
+          'line-opacity': 0.85,
+        },
+      })
+
       setMapReady(true)
     })
 
@@ -133,11 +200,105 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
 
     return () => {
       observer.disconnect()
+      trackAbortRef.current?.abort()
       map.remove()
       mapRef.current = null
       markersRef.current.clear()
     }
   }, [airfieldLat, airfieldLng, airfieldName])
+
+  /** Run a camera move that must not count as a user gesture. */
+  function moveProgrammatically(map: maplibregl.Map, move: () => void) {
+    programmaticMoveRef.current = true
+    const clear = () => {
+      programmaticMoveRef.current = false
+      map.off('moveend', clear)
+    }
+    map.on('moveend', clear)
+    move()
+  }
+
+  // Focus changed: fly to the aircraft, load its stored 24 h track.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return
+    const map = mapRef.current
+
+    // Always start clean – also covers unfocus and aircraft change.
+    trackAbortRef.current?.abort()
+    trackAbortRef.current = null
+    trackPointsRef.current = []
+    pendingLiveRef.current = []
+    trackLoadedRef.current = false
+    lastLivePosRef.current = null
+    setTrackSource(map, [], TRACK_FALLBACK_COLOR)
+    setTrackInfo(null)
+
+    if (!focusFlarmId) return
+
+    const flight = flightsRef.current.find((f) => f.flarmId === focusFlarmId)
+    if (flight && flight.latitude && flight.longitude) {
+      // Take over the camera: auto-fit must not fight the focus.
+      setUserInteracted(true)
+      moveProgrammatically(map, () =>
+        map.flyTo({
+          center: [flight.longitude, flight.latitude],
+          zoom: Math.max(map.getZoom(), FOCUS_ZOOM),
+          duration: 800,
+        })
+      )
+    }
+
+    if (!airfieldSlug) return
+
+    const controller = new AbortController()
+    trackAbortRef.current = controller
+    setTrackInfo({ state: 'loading' })
+
+    fetchTrack(airfieldSlug, focusFlarmId, TRACK_HOURS, controller.signal)
+      .then((track) => {
+        if (controller.signal.aborted) return
+        // Merge: stored points first, then live points newer than the last stored one.
+        const stored = track.points
+        const lastStored = stored.length > 0 ? stored[stored.length - 1] : undefined
+        const lastStoredT = lastStored ? Date.parse(lastStored.t) : -Infinity
+        const live = pendingLiveRef.current.filter((p) => Date.parse(p.t) > lastStoredT)
+        trackPointsRef.current = [...stored, ...live]
+        pendingLiveRef.current = []
+        trackLoadedRef.current = true
+        const current = flightsRef.current.find((f) => f.flarmId === focusFlarmId)
+        setTrackSource(map, trackPointsRef.current, trackColor(current))
+        setTrackInfo({ state: 'loaded', count: stored.length, hours: trackHoursLabel(track.since) })
+        // No live position (e.g. archived flight of today): show the stored
+        // track instead, otherwise the focus would change nothing visible.
+        const hasLivePos = !!(current && current.latitude && current.longitude)
+        if (!hasLivePos && stored.length > 0) {
+          const bounds = new maplibregl.LngLatBounds()
+          for (const p of stored) {
+            if (isFinite(p.lat) && isFinite(p.lon)) bounds.extend([p.lon, p.lat])
+          }
+          if (!bounds.isEmpty()) {
+            setUserInteracted(true)
+            moveProgrammatically(map, () =>
+              map.fitBounds(bounds, { padding: 60, maxZoom: FOCUS_ZOOM, duration: 800 })
+            )
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return
+        // Keep the live part of the track even if the stored one failed.
+        trackLoadedRef.current = true
+        trackPointsRef.current = pendingLiveRef.current
+        pendingLiveRef.current = []
+        setTrackInfo({ state: 'error' })
+        console.warn('Track konnte nicht geladen werden', err)
+      })
+
+    return () => {
+      controller.abort()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusFlarmId, mapReady, airfieldSlug])
 
   // Update aircraft markers
   useEffect(() => {
@@ -154,6 +315,7 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
       const color = STATUS_COLORS[flight.status] || '#6b7280'
       const isAlarm = ['alarm', 'emergency'].includes(flight.status)
       const label = flight.registration || flight.flarmId
+      const isFocused = flight.flarmId === focusFlarmId
 
       let marker = markersRef.current.get(flight.flarmId)
       if (marker) {
@@ -161,10 +323,10 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
         marker.setLngLat([flight.longitude, flight.latitude])
         // Update element
         const el = marker.getElement()
-        updateMarkerElement(el, flight.trackDeg, color, label, isAlarm)
+        updateMarkerElement(el, flight.trackDeg, color, label, isAlarm, isFocused)
       } else {
         // Create new marker
-        const el = createMarkerElement(flight.trackDeg, color, label, isAlarm)
+        const el = createMarkerElement(flight.trackDeg, color, label, isAlarm, isFocused)
         marker = new maplibregl.Marker({ element: el, anchor: 'center' })
           .setLngLat([flight.longitude, flight.latitude])
           .addTo(map)
@@ -183,6 +345,34 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
     // Update QDR lines
     if (airfieldLat && airfieldLng) {
       updateQdrLines(map, flights, airfieldLat, airfieldLng)
+    }
+
+    // Focus mode: grow the track with live positions and keep the aircraft
+    // in view – but only re-center when it actually left the viewport, a
+    // camera move on every beacon would jitter.
+    if (focusFlarmId) {
+      const focused = flights.find((f) => f.flarmId === focusFlarmId)
+      if (focused && focused.latitude && focused.longitude) {
+        const last = lastLivePosRef.current
+        const moved = !last || last.lat !== focused.latitude || last.lon !== focused.longitude
+        if (moved) {
+          lastLivePosRef.current = { lat: focused.latitude, lon: focused.longitude }
+          const point = liveTrackPoint(focused)
+          if (trackLoadedRef.current) {
+            if (appendLivePoint(trackPointsRef.current, point)) {
+              setTrackSource(map, trackPointsRef.current, trackColor(focused))
+            }
+          } else {
+            appendLivePoint(pendingLiveRef.current, point)
+          }
+
+          const pos: [number, number] = [focused.longitude, focused.latitude]
+          if (!map.getBounds().contains(pos)) {
+            moveProgrammatically(map, () => map.easeTo({ center: pos, duration: 600 }))
+          }
+        }
+      }
+      return
     }
 
     // Auto-fit bounds — only when the user has not taken control AND
@@ -207,52 +397,165 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
         if (!allInside) {
           // Mark this as a programmatic move so the gesture listeners
           // don't think the user did it.
-          programmaticMoveRef.current = true
-          map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
-          const clear = () => {
-            programmaticMoveRef.current = false
-            map.off('moveend', clear)
-          }
-          map.on('moveend', clear)
+          moveProgrammatically(map, () =>
+            map.fitBounds(bounds, { padding: 60, maxZoom: 13, duration: 500 })
+          )
         }
       }
     }
-  }, [flights, mapReady, airfieldLat, airfieldLng, userInteracted])
+  }, [flights, mapReady, airfieldLat, airfieldLng, userInteracted, focusFlarmId])
 
   function resetView() {
     setUserInteracted(false)
+    // Leaving focus mode also clears the track (see focus effect).
+    onClearFocus?.()
   }
+
+  const showReset = userInteracted || !!focusFlarmId
 
   return (
     <div className="relative w-full h-full min-h-[400px]">
       <div ref={mapContainer} className="absolute inset-0 rounded-lg overflow-hidden" />
-      {userInteracted && (
-        <button
-          onClick={resetView}
-          className="absolute top-3 left-3 z-10 bg-tower-surface/95 hover:bg-tower-qdr
-            border border-tower-qdr/60 text-tower-qdr hover:text-white
-            text-sm font-semibold rounded-lg px-3 py-2 shadow-lg backdrop-blur
-            transition-colors flex items-center gap-2"
-          title="Karte automatisch auf alle Flugzeuge zentrieren"
-        >
-          <span aria-hidden>⌖</span>
-          Zurück zur Übersicht
-        </button>
+      {showReset && (
+        <div className="absolute top-3 left-3 z-10 flex flex-col items-start gap-1.5">
+          <button
+            onClick={resetView}
+            className="bg-tower-surface/95 hover:bg-tower-qdr
+              border border-tower-qdr/60 text-tower-qdr hover:text-white
+              text-sm font-semibold rounded-lg px-3 py-2 shadow-lg backdrop-blur
+              transition-colors flex items-center gap-2"
+            title="Karte automatisch auf alle Flugzeuge zentrieren"
+          >
+            <span aria-hidden>⌖</span>
+            Zurück zur Übersicht
+          </button>
+          {focusFlarmId && trackInfo && (
+            <div className="bg-tower-surface/90 border border-tower-border text-gray-400
+              text-xs rounded-md px-2 py-1 shadow backdrop-blur">
+              {trackInfo.state === 'loading' && 'Spur wird geladen …'}
+              {trackInfo.state === 'loaded' && (trackInfo.count > 0
+                ? `Spur: letzte ${trackInfo.hours} h · ${trackInfo.count} Punkte`
+                : 'keine Spur gespeichert')}
+              {trackInfo.state === 'error' && 'Spur nicht verfügbar'}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
 }
 
-function createMarkerElement(trackDeg: number, color: string, label: string, isAlarm: boolean): HTMLDivElement {
+function trackColor(flight: Flight | undefined): string {
+  return (flight && STATUS_COLORS[flight.status]) || TRACK_FALLBACK_COLOR
+}
+
+/**
+ * Hours covered by a track response, derived from its `since` timestamp so
+ * the legend matches what the backend actually returned. Falls back to
+ * TRACK_HOURS when `since` is missing or unparseable (older backend).
+ */
+function trackHoursLabel(since: string): number {
+  const sinceT = Date.parse(since)
+  if (!isFinite(sinceT)) return TRACK_HOURS
+  const hours = Math.round((Date.now() - sinceT) / (60 * 60 * 1000))
+  return hours > 0 ? hours : TRACK_HOURS
+}
+
+/**
+ * Append a live point to a track array in place, matching the backend's
+ * 5 s thinning, and drop points older than TRACK_HOURS from the front so the
+ * array stays bounded during a long tower session.
+ *
+ * Returns true when the array changed (caller should re-render the source).
+ */
+function appendLivePoint(points: TrackPoint[], point: TrackPoint): boolean {
+  const lastPoint = points.length > 0 ? points[points.length - 1] : undefined
+  if (lastPoint) {
+    const dt = Date.parse(point.t) - Date.parse(lastPoint.t)
+    if (isFinite(dt) && dt < TRACK_LIVE_MIN_INTERVAL_MS) return false
+  }
+  points.push(point)
+
+  const cutoff = Date.now() - TRACK_MAX_AGE_MS
+  let first = points[0]
+  while (first !== undefined) {
+    const t = Date.parse(first.t)
+    if (!isFinite(t) || t >= cutoff) break
+    points.shift()
+    first = points[0]
+  }
+  return true
+}
+
+/** Build a track point from the live hot-state position of a flight. */
+function liveTrackPoint(f: Flight): TrackPoint {
+  const t = f.lastSeen && !isNaN(Date.parse(f.lastSeen)) ? f.lastSeen : new Date().toISOString()
+  return {
+    t,
+    lat: f.latitude,
+    lon: f.longitude,
+    alt: f.altitudeM,
+    agl: f.altitudeAgl,
+    speed: f.speedKmh,
+    vs: f.verticalSpeedMs,
+    track: f.trackDeg,
+  }
+}
+
+/**
+ * Convert track points to one LineString per continuous segment. A gap of
+ * more than TRACK_GAP_MS between consecutive points starts a new segment so
+ * separate flights of the same aircraft are not connected.
+ */
+function trackToGeoJson(points: TrackPoint[], color: string): GeoJSON.FeatureCollection {
+  const segments: [number, number][][] = []
+  let current: [number, number][] = []
+  let prevT: number | null = null
+
+  for (const p of points) {
+    if (!isFinite(p.lat) || !isFinite(p.lon)) continue
+    const t = Date.parse(p.t)
+    if (prevT !== null && isFinite(t) && t - prevT > TRACK_GAP_MS && current.length > 0) {
+      segments.push(current)
+      current = []
+    }
+    current.push([p.lon, p.lat])
+    if (isFinite(t)) prevT = t
+  }
+  if (current.length > 0) segments.push(current)
+
+  return {
+    type: 'FeatureCollection',
+    features: segments
+      .filter((seg) => seg.length >= 2)
+      .map((seg) => ({
+        type: 'Feature' as const,
+        properties: { color },
+        geometry: { type: 'LineString' as const, coordinates: seg },
+      })),
+  }
+}
+
+function setTrackSource(map: maplibregl.Map, points: TrackPoint[], color: string) {
+  const source = map.getSource('track-line') as maplibregl.GeoJSONSource | undefined
+  if (source) {
+    source.setData(trackToGeoJson(points, color))
+  }
+}
+
+function createMarkerElement(trackDeg: number, color: string, label: string, isAlarm: boolean, isFocused: boolean): HTMLDivElement {
   const el = document.createElement('div')
-  updateMarkerElement(el, trackDeg, color, label, isAlarm)
+  updateMarkerElement(el, trackDeg, color, label, isAlarm, isFocused)
   return el
 }
 
-function updateMarkerElement(el: HTMLElement, trackDeg: number, color: string, label: string, isAlarm: boolean) {
+function updateMarkerElement(el: HTMLElement, trackDeg: number, color: string, label: string, isAlarm: boolean, isFocused: boolean) {
+  // Focused aircraft: slightly larger label with a white ring so it stands out.
+  const fontSize = isFocused ? '12px' : '10px'
+  const ring = isFocused ? ';box-shadow:0 0 0 2px #fff, 0 0 6px rgba(0,0,0,0.6)' : ''
   el.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)">
-      <div style="font-size:10px;color:white;background:${color};padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold;margin-bottom:2px${isAlarm ? ';animation:pulse 0.5s ease-in-out infinite' : ''}">${label}</div>
+      <div style="font-size:${fontSize};color:white;background:${color};padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold;margin-bottom:2px${ring}${isAlarm ? ';animation:pulse 0.5s ease-in-out infinite' : ''}">${label}</div>
       <div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:16px solid ${color};transform:rotate(${trackDeg}deg);filter:drop-shadow(0 0 2px rgba(0,0,0,0.5))"></div>
     </div>
   `

@@ -32,6 +32,8 @@ export default function MonitorPage() {
   const [clock, setClock] = useState(utcNow())
   const [view, setView] = useState<ViewMode>('table')
   const [selectedFlight, setSelectedFlight] = useState<Flight | null>(null)
+  // Split view: aircraft the map is centered on (row click). null = overview.
+  const [focusFlarmId, setFocusFlarmId] = useState<string | null>(null)
 
   // Set slug and connect WebSocket
   useEffect(() => {
@@ -48,6 +50,12 @@ export default function MonitorPage() {
   }, [])
 
   const allFlights = getCombinedFlights()
+
+  function switchView(mode: ViewMode) {
+    setView(mode)
+    // A focus only makes sense in split view; drop it when the layout changes.
+    setFocusFlarmId(null)
+  }
 
   // h-screen (not min-h-screen): a flex column needs a definite height, otherwise
   // flex-1 children only grow with their content and the map's h-full collapses
@@ -84,9 +92,9 @@ export default function MonitorPage() {
           <div className="flex items-center gap-4">
             {/* View toggle */}
             <div className="flex bg-tower-bg rounded-lg border border-tower-border overflow-hidden">
-              <ViewButton label="Tabelle" active={view === 'table'} onClick={() => setView('table')} />
-              <ViewButton label="Karte" active={view === 'map'} onClick={() => setView('map')} />
-              <ViewButton label="Split" active={view === 'split'} onClick={() => setView('split')} />
+              <ViewButton label="Tabelle" active={view === 'table'} onClick={() => switchView('table')} />
+              <ViewButton label="Karte" active={view === 'map'} onClick={() => switchView('map')} />
+              <ViewButton label="Split" active={view === 'split'} onClick={() => switchView('split')} />
             </div>
             <ConnectionStatus />
             <div className="text-gray-400 font-mono text-sm">{clock} UTC</div>
@@ -115,10 +123,22 @@ export default function MonitorPage() {
         {view === 'split' && (
           <div className="flex-1 flex gap-4 px-4 pb-12 min-h-0">
             <div className="w-1/2 overflow-auto">
-              <FlightTable flights={allFlights} onSelect={setSelectedFlight} stripFields={stripFields} />
+              {/* Row click focuses the map; the drawer opens via "Details". */}
+              <FlightTable
+                flights={allFlights}
+                onFocus={(f) => setFocusFlarmId(f.flarmId)}
+                onDetails={setSelectedFlight}
+                focusedFlarmId={focusFlarmId ?? undefined}
+                stripFields={stripFields}
+              />
             </div>
             <div className="w-1/2">
-              <MapView flights={allFlights} />
+              <MapView
+                flights={allFlights}
+                airfieldSlug={slug}
+                focusFlarmId={focusFlarmId}
+                onClearFocus={() => setFocusFlarmId(null)}
+              />
             </div>
           </div>
         )}

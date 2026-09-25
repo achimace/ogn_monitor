@@ -98,6 +98,26 @@ export interface FlightSummary {
   launchType: LaunchType | null
 }
 
+/** One stored position of a flight track (GET /monitor/{slug}/flights/{flarmId}/track) */
+export interface TrackPoint {
+  /** ISO-8601 timestamp (UTC, "Z") */
+  t: string
+  lat: number
+  lon: number
+  alt: number
+  agl?: number | null
+  speed?: number | null
+  vs?: number | null
+  track?: number | null
+}
+
+export interface FlightTrack {
+  airfield: string
+  flarmId: string
+  since: string
+  points: TrackPoint[]
+}
+
 export interface AlarmPosition {
   latitude: number
   longitude: number
