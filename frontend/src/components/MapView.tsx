@@ -126,7 +126,13 @@ export default function MapView({ flights, airfieldLat, airfieldLng, airfieldNam
 
     mapRef.current = map
 
+    // MapLibre only listens to window resizes; the container also changes
+    // size when the layout switches between "Karte" and "Split".
+    const observer = new ResizeObserver(() => map.resize())
+    observer.observe(mapContainer.current)
+
     return () => {
+      observer.disconnect()
       map.remove()
       mapRef.current = null
       markersRef.current.clear()

@@ -49,8 +49,11 @@ export default function MonitorPage() {
 
   const allFlights = getCombinedFlights()
 
+  // h-screen (not min-h-screen): a flex column needs a definite height, otherwise
+  // flex-1 children only grow with their content and the map's h-full collapses
+  // to its min-height.
   return (
-    <div className="min-h-screen bg-tower-bg text-gray-100 flex flex-col">
+    <div className="h-screen overflow-hidden bg-tower-bg text-gray-100 flex flex-col">
       {/* Header */}
       <header className="bg-tower-surface border-b border-tower-border px-6 py-3 shrink-0">
         <div className="flex items-center justify-between">
@@ -104,7 +107,7 @@ export default function MonitorPage() {
         )}
 
         {view === 'map' && (
-          <div className="flex-1 px-4 pb-12">
+          <div className="flex-1 min-h-0 px-4 pb-12">
             <MapView flights={allFlights} />
           </div>
         )}
