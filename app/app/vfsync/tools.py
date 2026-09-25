@@ -12,6 +12,12 @@ self-activation); this tool is the operator's path. Secrets are read
 from arguments or - preferred - from the environment variables
 VF_PASSWORD_MD5 / VF_PASSWORD / VF_APPKEY so they do not end up in the
 shell history.
+
+After every successful write the slug is published on the Redis channel
+``vfsync:config`` so the running worker reloads its tenants immediately
+(no restart, no wait for VFSYNC_CONFIG_RELOAD_S). Publishing is best
+effort: without Redis the command still succeeds and the worker picks
+the change up with its periodic reload.
 """
 
 import argparse
@@ -20,8 +26,18 @@ import hashlib
 import os
 import sys
 
+import structlog
+
 from app.db.connection import close_db, get_db, init_db
+from app.redis_client import close_redis, init_redis
 from app.vfsync import crypto
+from app.vfsync.redis_keys import VFSYNC_CONFIG_CHANNEL
+
+log = structlog.get_logger()
+
+# Upper bound for connecting to Redis in notify_config_changed: the CLI must
+# not hang when Redis is unreachable (the DB write already succeeded).
+CONFIG_SIGNAL_TIMEOUT_S = 5.0
 
 
 async def _airfield_id(slug: str):
@@ -29,6 +45,26 @@ async def _airfield_id(slug: str):
     if not row:
         sys.exit(f"airfield '{slug}' not found")
     return row["id"]
+
+
+async def notify_config_changed(slug: str) -> bool:
+    """Publish ``slug`` on vfsync:config (best effort, never raises).
+
+    Connecting is bounded by ``CONFIG_SIGNAL_TIMEOUT_S``; a timeout is
+    logged like any other Redis failure (asyncio.TimeoutError is an
+    Exception subclass).
+    """
+    try:
+        redis = await asyncio.wait_for(init_redis(), timeout=CONFIG_SIGNAL_TIMEOUT_S)
+        try:
+            await redis.publish(VFSYNC_CONFIG_CHANNEL, slug)
+        finally:
+            await close_redis()
+    except Exception as exc:  # noqa: BLE001 - the DB write already succeeded
+        log.warning("vfsync_config_signal_failed", slug=slug, error=type(exc).__name__,
+                    hint="worker reloads with VFSYNC_CONFIG_RELOAD_S or after restart")
+        return False
+    return True
 
 
 async def cmd_set_credentials(args) -> None:
@@ -66,6 +102,7 @@ async def cmd_set_credentials(args) -> None:
         args.cid, args.base_url,
     )
     print(f"credentials stored for {args.slug} (encrypted)")
+    await notify_config_changed(args.slug)
 
 
 async def cmd_enable(args) -> None:
@@ -81,6 +118,7 @@ async def cmd_enable(args) -> None:
     if result.endswith("0"):
         sys.exit("no vf_sync_config row - run set-credentials first")
     print(f"{args.slug}: enabled, dry_run={dry_run}")
+    await notify_config_changed(args.slug)
 
 
 async def cmd_disable(args) -> None:
@@ -90,6 +128,7 @@ async def cmd_disable(args) -> None:
         airfield_id,
     )
     print(f"{args.slug}: disabled")
+    await notify_config_changed(args.slug)
 
 
 async def cmd_show(args) -> None:

@@ -7,6 +7,8 @@ SIGTERM/SIGINT:
 - event consumer  (Redis PubSub event:* -> coordinator)
 - scheduler       (15 min / hourly / 21:00 / 03:00 runs)
 - config reload   (every VFSYNC_CONFIG_RELOAD_S; new tenants get recovery)
+- config listener (Redis PubSub vfsync:config -> immediate reload; the
+                   periodic reload stays as fallback)
 - health          (Redis hash vfsync:health + HTTP /healthz)
 - monitoring      (alert rules R-12 every minute)
 
@@ -15,6 +17,7 @@ inside ``run()``.
 """
 
 import asyncio
+import inspect
 import signal
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -33,6 +36,7 @@ from app.vfsync.event_consumer import EventConsumer
 from app.vfsync.health import build_health_app, serve_health
 from app.vfsync.logging import configure_logging
 from app.vfsync.models import TenantConfig, utcnow
+from app.vfsync.redis_keys import VFSYNC_CONFIG_CHANNEL, VFSYNC_HEALTH_KEY
 from app.vfsync.scheduler import Scheduler
 from app.vfsync.stores import ConfigStore, SessionStore
 from app.vfsync.stores_pg import (
@@ -46,7 +50,7 @@ from app.vfsync.writer import VfWriter
 
 log = structlog.get_logger()
 
-HEALTH_KEY = "vfsync:health"
+HEALTH_KEY = VFSYNC_HEALTH_KEY
 MONITORING_INTERVAL_S = 60
 
 
@@ -64,6 +68,10 @@ class RuntimeState:
     redis: Any = None
     aprs_down_since: datetime | None = None
     last_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Serialises reload_config: the periodic loop and the PubSub listener
+    # may fire at the same time; without the lock both would see the same
+    # tenant as "added" and run its recovery twice.
+    reload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def config_errors(self) -> list[str]:
@@ -93,32 +101,90 @@ async def recover_tenants(coordinator: SyncCoordinator, tenants: list[TenantConf
 async def reload_config(state: RuntimeState, config: ConfigStore,
                         coordinator: SyncCoordinator) -> None:
     """Reload enabled tenants; newly enabled tenants get a recovery run,
-    reloaded credentials lift a login pause."""
-    tenants = await config.load_enabled()
-    known = {t.airfield_id: t for t in state.tenants}
-    added = [t for t in tenants if t.airfield_id not in known]
-    removed = [t.slug for t in state.tenants if t.airfield_id not in {x.airfield_id for x in tenants}]
-    for t in tenants:
-        old = known.get(t.airfield_id)
-        if old and (old.vf_password_md5, old.vf_appkey, old.vf_username) != (
-                t.vf_password_md5, t.vf_appkey, t.vf_username):
-            coordinator.resume(t)
-    state.tenants = tenants
-    if added or removed:
-        log.info("vfsync_config_changed", added=[t.slug for t in added], removed=removed,
-                 enabled=[t.slug for t in tenants])
-    if added:
-        await recover_tenants(coordinator, added)
+    reloaded credentials lift a login pause.
+
+    Serialised via ``state.reload_lock`` (periodic loop and PubSub
+    listener share it), so each newly enabled tenant is recovered once.
+    """
+    async with state.reload_lock:
+        tenants = await config.load_enabled()
+        known = {t.airfield_id: t for t in state.tenants}
+        added = [t for t in tenants if t.airfield_id not in known]
+        removed = [t.slug for t in state.tenants
+                   if t.airfield_id not in {x.airfield_id for x in tenants}]
+        for t in tenants:
+            old = known.get(t.airfield_id)
+            if old and (old.vf_password_md5, old.vf_appkey, old.vf_username) != (
+                    t.vf_password_md5, t.vf_appkey, t.vf_username):
+                coordinator.resume(t)
+        state.tenants = tenants
+        if added or removed:
+            log.info("vfsync_config_changed", added=[t.slug for t in added], removed=removed,
+                     enabled=[t.slug for t in tenants])
+        if added:
+            await recover_tenants(coordinator, added)
 
 
 async def config_reload_loop(state: RuntimeState, config: ConfigStore,
                              coordinator: SyncCoordinator, interval_s: float) -> None:
+    """Periodic fallback reload (the PubSub listener below is the fast path)."""
     while True:
         await asyncio.sleep(interval_s)
         try:
             await reload_config(state, config, coordinator)
         except Exception:
             log.exception("vfsync_config_reload_failed")
+
+
+async def _close_pubsub(pubsub: Any, channel: str) -> None:
+    for step in (lambda: pubsub.unsubscribe(channel), pubsub.close):
+        try:
+            result = step()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # pragma: no cover - best effort on shutdown
+            log.debug("vfsync_config_listener_close_failed", exc_info=True)
+
+
+async def config_change_listener(redis: Any, state: RuntimeState, config: ConfigStore,
+                                 coordinator: SyncCoordinator,
+                                 channel: str = VFSYNC_CONFIG_CHANNEL,
+                                 reconnect_delay_s: float | None = None) -> None:
+    """Reload the tenant config as soon as a ``vfsync:config`` message arrives.
+
+    The CLI tools and the config API publish the airfield slug after every
+    successful write. Same subscribe/reconnect/cancel behaviour as
+    ``EventConsumer.run``: one failing reload never stops the listener, a
+    Redis error re-subscribes after ``reconnect_delay_s``.
+    """
+    delay = settings.vfsync_pubsub_reconnect_s if reconnect_delay_s is None else reconnect_delay_s
+    while True:
+        pubsub = redis.pubsub()
+        try:
+            await pubsub.subscribe(channel)
+            log.info("vfsync_config_listener_started", channel=channel)
+            async for message in pubsub.listen():
+                if message.get("type") != "message":
+                    continue
+                payload = message.get("data")
+                if isinstance(payload, bytes):
+                    payload = payload.decode("utf-8", "replace")
+                log.info("vfsync_config_reload_triggered", payload=payload)
+                try:
+                    await reload_config(state, config, coordinator)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("vfsync_config_reload_failed", payload=payload)
+            log.warning("vfsync_config_listener_stream_ended", retry_in_s=delay)
+        except asyncio.CancelledError:
+            log.info("vfsync_config_listener_stopping")
+            raise
+        except Exception:
+            log.exception("vfsync_config_listener_error", retry_in_s=delay)
+        finally:
+            await _close_pubsub(pubsub, channel)
+        await asyncio.sleep(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +388,10 @@ async def run() -> None:
                 config_reload_loop(state, config_store, coordinator,
                                    settings.vfsync_config_reload_s),
                 name="vfsync-config-reload",
+            ),
+            asyncio.create_task(
+                config_change_listener(redis, state, config_store, coordinator),
+                name="vfsync-config-listener",
             ),
             asyncio.create_task(
                 health_loop(redis, state, settings.vfsync_health_interval_s),

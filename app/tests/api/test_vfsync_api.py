@@ -37,11 +37,19 @@ def _db_url() -> str:
 
 
 class FakeRedis:
-    def __init__(self, data: dict | None = None) -> None:
+    def __init__(self, data: dict | None = None, fail_publish: bool = False) -> None:
         self.data = data or {}
+        self.fail_publish = fail_publish
+        self.published: list[tuple[str, str]] = []
 
     async def hgetall(self, key: str) -> dict:
         return dict(self.data) if key == vfsync_api.VFSYNC_HEALTH_KEY else {}
+
+    async def publish(self, channel: str, payload: str) -> int:
+        if self.fail_publish:
+            raise ConnectionError("redis gone")
+        self.published.append((channel, payload))
+        return 1
 
 
 @pytest.fixture
@@ -170,6 +178,36 @@ async def test_put_creates_row_with_encrypted_credentials(client, conn, ids, cre
     r = await client.get(f"/api/vfsync/config/{ids.airfield_id}")
     assert r.status_code == 200
     assert r.json() == data
+
+
+async def test_put_signals_worker_via_redis(client, conn, ids, fake_redis, cred_key):
+    """Every successful PUT publishes the slug on vfsync:config so the worker
+    reloads immediately (UAT T-04); the GET does not."""
+    slug = await conn.fetchval("SELECT slug FROM airfields WHERE id = $1", ids.airfield_id)
+    r = await client.put(f"/api/vfsync/config/{ids.airfield_id}", json={"dry_run": True})
+    assert r.status_code == 200, r.text
+    r = await client.put(f"/api/vfsync/config/{ids.airfield_id}", json={"vf_appkey": "k"})
+    assert r.status_code == 200, r.text
+    assert fake_redis.published == [(vfsync_api.VFSYNC_CONFIG_CHANNEL, slug)] * 2
+
+    await client.get(f"/api/vfsync/config/{ids.airfield_id}")
+    assert len(fake_redis.published) == 2
+
+
+async def test_put_succeeds_when_redis_signal_fails(client, ids, fake_redis):
+    fake_redis.fail_publish = True
+    r = await client.put(f"/api/vfsync/config/{ids.airfield_id}", json={"dry_run": True})
+    assert r.status_code == 200, r.text
+    assert fake_redis.published == []
+
+
+async def test_publish_config_changed_is_best_effort():
+    """No Redis (tests / not initialised) and Redis errors never raise."""
+    assert await vfsync_api.publish_config_changed(None, "ohlstadt") is False
+    assert await vfsync_api.publish_config_changed(FakeRedis(fail_publish=True), "x") is False
+    ok = FakeRedis()
+    assert await vfsync_api.publish_config_changed(ok, "ohlstadt") is True
+    assert ok.published == [(vfsync_api.VFSYNC_CONFIG_CHANNEL, "ohlstadt")]
 
 
 async def test_put_partial_update_keeps_other_fields(client, conn, ids, cred_key):

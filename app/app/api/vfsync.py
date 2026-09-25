@@ -41,6 +41,7 @@ from app.vfsync.models import (
     SessionState,
     TenantConfig,
 )
+from app.vfsync.redis_keys import VFSYNC_CONFIG_CHANNEL, VFSYNC_HEALTH_KEY
 from app.vfsync.stores_pg import (
     Executor,
     PgAuditStore,
@@ -51,7 +52,7 @@ from app.vfsync.stores_pg import (
 log = structlog.get_logger()
 router = APIRouter(prefix="/api/vfsync", tags=["vfsync"])
 
-VFSYNC_HEALTH_KEY = "vfsync:health"
+__all__ = ["router", "VFSYNC_HEALTH_KEY", "VFSYNC_CONFIG_CHANNEL"]
 
 SESSIONS_PAGE_SIZE_DEFAULT = 50
 SESSIONS_PAGE_SIZE_MAX = 200
@@ -191,15 +192,33 @@ def _build_upsert_sql() -> str:
 _CONFIG_UPSERT = _build_upsert_sql()
 
 
+async def publish_config_changed(redis: Any, slug: str) -> bool:
+    """Tell the vfsync worker to reload its tenant config right away.
+
+    Best effort: without Redis (tests) or on a Redis error the config write
+    stays valid - the worker picks the change up with its periodic reload.
+    Returns True if the message was published.
+    """
+    if redis is None:
+        return False
+    try:
+        await redis.publish(VFSYNC_CONFIG_CHANNEL, slug)
+    except Exception as exc:  # noqa: BLE001 - never fail the write
+        log.warning("vfsync_config_signal_failed", slug=slug, error=type(exc).__name__)
+        return False
+    return True
+
+
 @router.put("/config/{airfield_id}", response_model=VfSyncConfigResponse)
 async def update_config(
     airfield_id: UUID,
     body: VfSyncConfigUpdateRequest,
     user: dict = Depends(get_current_user),
     db: Executor = Depends(db_executor),
+    redis: Any = Depends(redis_client),
 ):
     """Create or update the VF-Sync configuration (never changes `enabled`)."""
-    await _verify_airfield(db, airfield_id, user["tenant_id"])
+    airfield = await _verify_airfield(db, airfield_id, user["tenant_id"])
     provided = body.model_fields_set
 
     # (provided, value) per column; values for the INSERT path fall back to
@@ -231,6 +250,7 @@ async def update_config(
     # Field names only - never the values (credentials).
     log.info("vfsync_config_updated", airfield_id=str(airfield_id),
              fields=sorted(provided))
+    await publish_config_changed(redis, airfield["slug"])
     return _config_row_to_response(row)
 
 

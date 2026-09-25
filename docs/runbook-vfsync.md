@@ -33,6 +33,14 @@ Schnittstellen: `docs/dev-guides/vfsync-internals.md`).
    ```
    docker compose run --rm --no-deps api python -m app.vfsync.tools enable --slug ohlstadt
    ```
+   Ein laufender Worker übernimmt `set-credentials`, `enable`, `disable` und
+   Konfigurationsänderungen aus dem UI **sofort**: nach jedem erfolgreichen
+   Schreibvorgang wird der Slug auf dem Redis-Kanal `vfsync:config`
+   veröffentlicht, der Worker lädt daraufhin seine Mandanten neu
+   (Log `vfsync_config_reload_triggered`, dann `vfsync_config_changed`).
+   Fällt das Signal aus (Redis nicht erreichbar), greift der periodische
+   Reload (`VFSYNC_CONFIG_RELOAD_S`, Standard 5 min); ein Neustart des
+   Workers ist nur der Fallback, nicht der Normalweg.
 5. Profil dauerhaft aktivieren: `COMPOSE_PROFILES=vfsync` in `.env` (siehe
    `.env.example`). **Ohne diesen Eintrag** startet `deploy.sh`
    (`docker compose up -d --build`) den Worker nicht und baut einen bereits
@@ -121,7 +129,11 @@ Der Mock ist **nicht** für den Server gedacht: Profil `vfmock` und
 
 1. In VF: Passwort des technischen Users ändern, AppKey neu erzeugen.
 2. `set-credentials` (Abschnitt 2, Schritt 3) erneut ausführen.
-3. Worker neu starten: `docker compose --profile vfsync restart vfsync`.
+3. Der Worker übernimmt die neuen Credentials sofort (Redis-Signal
+   `vfsync:config`, Log `vfsync_config_reload_triggered`) und hebt eine
+   Login-Pause des Mandanten auf. Nur falls das Signal nicht ankommt
+   (Redis-Störung) und nicht bis zum periodischen Reload gewartet werden
+   soll: `docker compose --profile vfsync restart vfsync`.
 4. Bei Verdacht auf Schlüsselverlust zusätzlich `VFSYNC_CRED_KEY` neu erzeugen,
    dann Schritt 2 für **alle** Mandanten wiederholen (alte Tokens sind mit dem
    neuen Schlüssel nicht lesbar).
