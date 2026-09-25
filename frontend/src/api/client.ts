@@ -49,8 +49,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     url += `?${qs}`
   }
 
+  // FormData bodies must NOT get an explicit Content-Type – the browser sets
+  // multipart/form-data with the correct boundary itself.
+  const isFormData = init.body instanceof FormData
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(init.headers as Record<string, string> || {}),
   }
 
@@ -85,6 +88,10 @@ export const api = {
 
   delete: <T>(path: string) =>
     request<T>(path, { method: 'DELETE' }),
+
+  /** Multipart upload (e.g. CSV import). Bearer header is added, Content-Type is left to the browser. */
+  upload: <T>(path: string, formData: FormData) =>
+    request<T>(path, { method: 'POST', body: formData }),
 }
 
 export { ApiError }
