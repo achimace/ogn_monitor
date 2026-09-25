@@ -220,3 +220,27 @@ class CsvImportResponse(BaseModel):
     imported: int
     skipped: int
     errors: list[str]
+
+
+# =============================================
+# MONITOR
+# =============================================
+
+class TrackPoint(BaseModel):
+    """One point of an aircraft's flight track (monitor map)."""
+    t: str = Field(..., description="Beacon time, ISO 8601 UTC (Z)")
+    lat: float
+    lon: float
+    alt: int = Field(..., description="Altitude MSL (m)")
+    agl: int = Field(..., description="Altitude above airfield (m)")
+    speed: int = Field(..., description="Ground speed (km/h)")
+    vs: float = Field(..., description="Vertical speed (m/s)")
+    track: int = Field(..., description="Course (deg)")
+
+
+class TrackResponse(BaseModel):
+    """GET /api/monitor/{slug}/flights/{flarm_id}/track"""
+    airfield: str
+    flarm_id: str = Field(..., serialization_alias="flarmId")
+    since: str = Field(..., description="Start of the requested window, ISO 8601 UTC (Z)")
+    points: list[TrackPoint]

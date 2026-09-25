@@ -4,11 +4,13 @@ GET /api/monitor/{slug} returns the current flight state from Redis.
 No authentication required (public monitor).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.api.schemas import TrackPoint, TrackResponse
+from app.config import settings
 from app.dependencies import get_current_user
 from app.redis_client import get_redis
 
@@ -211,6 +213,88 @@ async def get_today(slug: str):
             "landed_visible_minutes": landed_visible_minutes,
         },
     }
+
+
+# Longest look-back the track stream can serve (its sliding TTL).
+_TRACK_MAX_HOURS = settings.track_retention_s / 3600
+
+
+@router.get("/{slug}/flights/{flarm_id}/track", response_model=TrackResponse)
+async def get_flight_track(
+    slug: str,
+    flarm_id: str,
+    hours: float = Query(
+        _TRACK_MAX_HOURS, ge=0.1, le=_TRACK_MAX_HOURS,
+        description="Look-back window in hours",
+    ),
+):
+    """Get an aircraft's flight track of the last ``hours`` hours.
+
+    Reads the thinned per-aircraft track stream written by the worker
+    (``track:{slug}:{flarm_id}``, stream id = beacon time in ms). Points are
+    returned in ascending time order. No authentication (public monitor).
+
+    Args:
+        slug: Airfield slug.
+        flarm_id: FLARM device ID (case-insensitive).
+        hours: Look-back window in hours, 0.1 .. stream retention
+            (``settings.track_retention_s``, default 24 h = default value).
+    """
+    redis = get_redis()
+    flarm_id = flarm_id.upper()
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    since_ms = int(since.timestamp() * 1000)
+
+    entries = await redis.xrange(f"track:{slug}:{flarm_id}", min=f"{since_ms}-0", max="+")
+
+    # No data: make sure the airfield exists at all (same rule as the
+    # status endpoint), otherwise answer with an empty track.
+    if not entries:
+        is_active = await redis.sismember("active_airfields", slug)
+        if not is_active:
+            from app.db.connection import get_db
+            db = get_db()
+            row = await db.fetchrow(
+                "SELECT slug FROM airfields WHERE slug = $1 AND is_active = TRUE",
+                slug,
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="Airfield not found")
+
+    points = [_track_point(entry_id, fields) for entry_id, fields in entries]
+
+    return TrackResponse(
+        airfield=slug,
+        flarm_id=flarm_id,
+        since=since.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        points=points,
+    )
+
+
+def _track_point(entry_id: str, fields: dict[str, str]) -> TrackPoint:
+    """Build a TrackPoint from a stream entry (id ``<ms>-<seq>``).
+
+    The Redis client runs with ``decode_responses=True``, so id and field
+    values arrive as ``str``.
+    """
+    ts_ms = int(entry_id.split("-", 1)[0])
+    t = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _get(name: str) -> str:
+        return fields.get(name, "0")
+
+    return TrackPoint(
+        t=t,
+        lat=float(_get("lat")),
+        lon=float(_get("lon")),
+        alt=int(float(_get("alt"))),
+        agl=int(float(_get("agl"))),
+        speed=int(float(_get("speed"))),
+        vs=float(_get("vs")),
+        track=int(float(_get("track"))),
+    )
 
 
 @router.post("/{slug}/flights/{flarm_id}/dismiss")

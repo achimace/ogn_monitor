@@ -794,6 +794,7 @@ Schicht 1: In-Memory (Python Dict)     <- Schnellste Schicht, < 1 Mikrosekunde
 Schicht 2: Redis (Hot State)            <- Persistiert ueber Prozess-Neustarts
   - HSET flight:{airfield}:{flarm_id}   Alle Felder des Live-Flugstatus
   - STREAM positions:{airfield}          Positions-Stream (statt position_log in PG)
+  - STREAM track:{airfield}:{flarm_id}   Flugspur pro LFZ, ID = Beacon-ms, alle 5s, TTL 24h gleitend
   -> Ueberlebt App-Restart, Redis-Daten bleiben
   -> Beim Start: Active Flights aus Redis wiederherstellen
   -> TTL: Automatisch bereinigt nach 24h
@@ -845,6 +846,13 @@ SADD flights:ohlstadt "000239" "001A4F" "00B3C2"
 XADD positions:ohlstadt MAXLEN ~5000 *
     flarm_id "000239" lat "47.3812" lon "11.1945" alt "2100"
     speed "85" vs "1.5" track "210"
+
+# Flugspur pro Luftfahrzeug fuer die Monitor-Karte (max. 1 Punkt / 5 s,
+# Entry-ID = Beacon-Zeit in ms, EXPIRE 86400 gleitend; API: XRANGE nach Zeit)
+XADD track:ohlstadt:000239 MAXLEN ~17280 1773238424000-*
+    lat "47.3812" lon "11.1945" alt "2100" agl "1440"
+    speed "85" vs "1.5" track "210"
+EXPIRE track:ohlstadt:000239 86400
 ```
 
 ### Sync-Strategie: Redis -> PostgreSQL

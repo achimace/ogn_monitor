@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings
 from app.tracking.flight_state import FlightState, FlightStatus
 from app.tracking.flight_tracker import FlightTracker
 from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE
@@ -26,6 +27,7 @@ class FakeRedisWriter:
     def __init__(self):
         self.flights: dict[tuple[str, str], dict] = {}
         self.events: list[tuple[str, str, str]] = []
+        self.track_points: list[tuple[str, str, int]] = []
 
     async def update_flight(self, slug, fid, data, ttl=None):
         self.flights[(slug, fid)] = data
@@ -35,6 +37,9 @@ class FakeRedisWriter:
 
     async def add_position(self, slug, fid, *args):
         pass
+
+    async def add_track_point(self, slug, fid, ts_ms, *args, retention_s=0, min_interval_s=0):
+        self.track_points.append((slug, fid, ts_ms))
 
     async def publish_event(self, slug, etype, fid, data=None, message=""):
         self.events.append((slug, etype, fid))
@@ -145,3 +150,72 @@ def test_from_redis_ignores_simulated_marker():
     flight = FlightState.from_redis(data, "test")
     assert flight.flarm_id == "SIM001" and flight.registration == "D-SIM"
     assert not hasattr(flight, SIMULATED_FIELD)
+
+
+# ---------------------------------------------------------------------------
+# Per-aircraft track stream (thinned)
+# ---------------------------------------------------------------------------
+
+def _track_writes(tracker: FlightTracker, fid: str | None = None):
+    return [p for p in tracker.redis_writer.track_points
+            if fid is None or p[1] == fid]
+
+
+def _airborne(fid: str, t: float):
+    return beacon(fid, t, east=300 + t * 20, alt=AF_ELEV + 120, speed=95, vs=2.0)
+
+
+def _ms(b) -> int:
+    return int(b.timestamp * 1000)
+
+
+async def test_track_points_are_thinned_by_beacon_time(tracker, monkeypatch):
+    monkeypatch.setattr(settings, "track_min_interval_s", 5)
+    # ground roll: flight exists from the takeoff beacon at t=15 on
+    roll = ground_roll(GLD)
+    await _feed(tracker, roll)
+    assert [w[2] for w in _track_writes(tracker)] == [_ms(roll[-1])]
+
+    # 2 s after the last write -> thinned out
+    b2 = _airborne(GLD, 17)
+    await _feed(tracker, [b2])
+    assert len(_track_writes(tracker)) == 1
+
+    # 6 s after the last write -> second point
+    b3 = _airborne(GLD, 21)
+    await _feed(tracker, [b3])
+    writes = _track_writes(tracker)
+    assert [w[2] for w in writes] == [_ms(roll[-1]), _ms(b3)]
+    assert writes[0][:2] == ("test", GLD)
+
+
+async def test_track_thinning_is_independent_per_aircraft(tracker, monkeypatch):
+    monkeypatch.setattr(settings, "track_min_interval_s", 5)
+    other = "GLD002"
+    # takeoffs at t=15 (GLD) and t=16 (other)
+    await _feed(tracker, sorted(ground_roll(GLD) + ground_roll(other, t0=1),
+                                key=lambda b: b.timestamp))
+    assert len(_track_writes(tracker, GLD)) == 1
+    assert len(_track_writes(tracker, other)) == 1
+
+    await _feed(tracker, [_airborne(GLD, 17), _airborne(other, 18)])
+    assert len(_track_writes(tracker, GLD)) == 1
+    assert len(_track_writes(tracker, other)) == 1
+
+    # only GLD passes the interval -> only GLD gets a new point
+    await _feed(tracker, [_airborne(GLD, 20), _airborne(other, 20)])
+    assert len(_track_writes(tracker, GLD)) == 2
+    assert len(_track_writes(tracker, other)) == 1
+    assert set(tracker._last_track_ts) == {f"test:{GLD}", f"test:{other}"}
+
+
+async def test_track_thinning_state_is_cleared_on_archive(tracker):
+    flight = await _feed(tracker, ground_roll(GLD))
+    assert f"test:{GLD}" in tracker._last_track_ts
+
+    await tracker._archive_flight("test", flight)
+
+    assert f"test:{GLD}" not in tracker._last_track_ts
+    # the next flight of the same aircraft writes right away
+    await _feed(tracker, ground_roll(GLD, t0=16))
+    assert len(_track_writes(tracker)) == 2

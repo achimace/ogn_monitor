@@ -37,6 +37,31 @@ Type:   SET
 Values: FLARM-IDs aller aktiven Fluege
 ```
 
+### Flugspur pro Luftfahrzeug (Stream)
+```
+Key:    track:{airfield_slug}:{flarm_id}
+Type:   STREAM, Entry-ID = Beacon-Zeit in ms ("{ts_ms}-*"), damit XRANGE nach Zeit geht
+TTL:    settings.track_retention_s (86400 = 24h), gleitend - jeder Write erneuert
+MAXLEN: ~ track_retention_s / track_min_interval_s (approximate, Speicher-Guard)
+
+Felder: lat, lon, alt (MSL m), agl (m), speed (km/h), vs (m/s), track (deg)
+        - alle als Strings wie im positions:-Stream
+
+Ausduennung: der Worker schreibt nur, wenn seit dem letzten Punkt dieses
+LFZ mindestens settings.track_min_interval_s (5 s) Beacon-Zeit vergangen ist
+(FlightTracker._last_track_ts). Out-of-order-Beacons (ID <= letzter Eintrag)
+werden verworfen (ResponseError "equal or smaller than the target stream top
+item", debug-Log); jeder andere ResponseError wird weitergereicht.
+
+Gelesen von GET /api/monitor/{slug}/flights/{flarm_id}/track?hours=24
+(XRANGE track:... {since_ms}-0 +; Obergrenze von hours = track_retention_s/3600).
+
+Einschraenkung: Weil die Beacon-Millisekunden die Stream-ID sind, hat die Spur
+nach einem beacon_timeline_reset der State Machine (Empfaenger-Uhr lief vor)
+eine Luecke: Beacons mit Zeit <= Top-ID des Streams werden als out-of-order
+verworfen, bis die Beacon-Zeit die Top-ID wieder ueberholt hat.
+```
+
 ### Aktive Flugplaetze (Set)
 ```
 Key:    active_airfields

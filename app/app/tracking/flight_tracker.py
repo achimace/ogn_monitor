@@ -15,6 +15,7 @@ import asyncio
 import structlog
 
 from app.aprs.beacon_parser import Beacon, parse_beacon
+from app.config import settings
 from app.data.aircraft_resolver import AircraftResolver
 from app.tracking.flight_profile_buffer import FlightProfileBuffer
 from app.tracking.flight_state import FlightState, FlightStatus
@@ -48,6 +49,10 @@ class FlightTracker:
 
         # Airfield configs: slug -> AirfieldConfig
         self._configs: dict[str, AirfieldConfig] = {}
+
+        # Beacon time (epoch s) of the last point written to the
+        # per-aircraft track stream, keyed by "{slug}:{flarm_id}" (thinning).
+        self._last_track_ts: dict[str, float] = {}
 
     def set_configs(self, configs: dict[str, AirfieldConfig]) -> None:
         """Update airfield configurations."""
@@ -165,6 +170,20 @@ class FlightTracker:
             beacon.lat, beacon.lon, beacon.altitude,
             beacon.speed, beacon.vs, beacon.track,
         )
+
+        # Thinned per-aircraft track stream (monitor map, last 24h)
+        track_key = f"{slug}:{beacon.flarm_id}"
+        last_track = self._last_track_ts.get(track_key)
+        if (last_track is None
+                or beacon.timestamp - last_track >= settings.track_min_interval_s):
+            self._last_track_ts[track_key] = beacon.timestamp
+            await self.redis_writer.add_track_point(
+                slug, beacon.flarm_id, int(beacon.timestamp * 1000),
+                beacon.lat, beacon.lon, beacon.altitude, flight.altitude_agl,
+                beacon.speed, beacon.vs, beacon.track,
+                retention_s=settings.track_retention_s,
+                min_interval_s=settings.track_min_interval_s,
+            )
 
         # Process and publish state machine events (incl. archival on
         # restart / sticky-landed-expired).
@@ -288,6 +307,7 @@ class FlightTracker:
         self.state_machine.archive_flight(airfield_slug, flight.flarm_id)
         self.launch_detector.cleanup(flight.flarm_id)
         self.profile_buffer.remove(flight.flarm_id)
+        self._last_track_ts.pop(f"{airfield_slug}:{flight.flarm_id}", None)
         await self.redis_writer.remove_flight(airfield_slug, flight.flarm_id)
 
         log.info(

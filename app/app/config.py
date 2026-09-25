@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     alarm_timeout_s: int = 600  # 10 minutes without beacon -> ALARM
     signal_loss_timeout_s: int = 300  # 5 minutes -> start concern
 
+    # Per-aircraft track stream (track:{slug}:{flarm_id}) for the monitor map
+    track_min_interval_s: int = 5  # Thinning: min. beacon-time gap between stored points
+    track_retention_s: int = 86400  # 24h sliding TTL of the track stream
+
     # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
     vfsync_enabled: bool = False
     vfsync_cred_key: str = ""            # Fernet key (base64) for vf_sync_config credentials

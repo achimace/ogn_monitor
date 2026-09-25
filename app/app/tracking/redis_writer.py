@@ -7,6 +7,7 @@ Redis Key Schema:
   flight:{airfield_slug}:{flarm_id}  -> Hash with all flight fields
   flights:{airfield_slug}            -> Set of active FLARM IDs
   positions:{airfield_slug}          -> Stream of position updates
+  track:{airfield_slug}:{flarm_id}   -> Stream of thinned track points (id = beacon ms)
   ogn:health                         -> Hash with OGN connection status
   event:{airfield_slug}              -> PubSub channel for status change events
   beacon:{airfield_slug}             -> PubSub channel for beacon updates
@@ -17,6 +18,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 import structlog
+from redis.exceptions import ResponseError
 
 from app.config import settings
 
@@ -28,6 +30,11 @@ log = structlog.get_logger()
 # flight_status or flight_log (the entry expires via its TTL).
 SIMULATED_FIELD = "simulated"
 SIMULATED_VALUE = "1"
+
+# Redis' error text for XADD with an explicit id that is not greater than
+# the stream's current top id (out-of-order beacon). Only this case is
+# swallowed in ``add_track_point``.
+XADD_OUT_OF_ORDER_MSG = "equal or smaller than the target stream top item"
 
 
 class RedisWriter:
@@ -118,6 +125,67 @@ class RedisWriter:
             maxlen=5000,
             approximate=True,
         )
+
+    async def add_track_point(self, airfield_slug: str, flarm_id: str, ts_ms: int,
+                              lat: float, lon: float, alt_m: float, alt_agl_m: float,
+                              speed_kmh: float, vs_ms: float, track_deg: float,
+                              retention_s: int, min_interval_s: int) -> None:
+        """Append a point to the per-aircraft track stream.
+
+        The stream id is the beacon time (``{ts_ms}-*``) so the API can
+        XRANGE by time. Every write refreshes the sliding TTL; MAXLEN is
+        derived from retention / thinning interval as a memory guard.
+
+        Out-of-order beacons (ts_ms not greater than the last entry) make
+        XADD fail with a ResponseError; only that case is skipped, any
+        other Redis error propagates.
+
+        Args:
+            airfield_slug: Airfield identifier.
+            flarm_id: FLARM device ID.
+            ts_ms: Beacon time as Unix epoch milliseconds.
+            lat, lon: WGS84 position.
+            alt_m: Altitude MSL (m).
+            alt_agl_m: Altitude above the airfield (m).
+            speed_kmh: Ground speed (km/h).
+            vs_ms: Vertical speed (m/s).
+            track_deg: Course (degrees).
+            retention_s: Sliding TTL of the stream (seconds).
+            min_interval_s: Thinning interval (seconds); with retention_s
+                it bounds the number of entries (MAXLEN).
+        """
+        key = f"track:{airfield_slug}:{flarm_id}"
+        maxlen = max(1, retention_s // max(1, min_interval_s))
+
+        pipe = self._redis.pipeline()
+        pipe.xadd(
+            key,
+            {
+                "lat": str(round(lat, 5)),
+                "lon": str(round(lon, 5)),
+                "alt": str(round(alt_m)),
+                "agl": str(round(alt_agl_m)),
+                "speed": str(round(speed_kmh)),
+                "vs": str(round(vs_ms, 1)),
+                "track": str(round(track_deg)),
+            },
+            id=f"{ts_ms}-*",
+            maxlen=maxlen,
+            approximate=True,
+        )
+        pipe.expire(key, retention_s)
+        try:
+            await pipe.execute()
+        except ResponseError as exc:
+            if XADD_OUT_OF_ORDER_MSG not in str(exc):
+                raise
+            log.debug(
+                "track_point_skipped",
+                airfield=airfield_slug,
+                flarm_id=flarm_id,
+                ts_ms=ts_ms,
+                error=str(exc),
+            )
 
     async def remove_flight(self, airfield_slug: str, flarm_id: str) -> None:
         """Remove a flight from the active set (after landing/archive)."""
