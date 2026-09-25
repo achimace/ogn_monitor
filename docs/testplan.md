@@ -93,8 +93,9 @@ DDD333,D-KMSF,C,Arcus M,motor_glider
 ### 1.5 Flug-Simulator (für VF-Sync ohne echten Flugbetrieb)
 
 Erzeugt die Ereignisse eines Flugs genau so, wie der Tracking-Worker sie
-veröffentlicht. Der Flug erscheint kurz im Tower-Monitor (per WebSocket) und
-wird von VF-Sync verarbeitet.
+veröffentlicht, und schreibt dabei auch den Redis-Hot-State. Der Flug erscheint
+im Tower-Monitor (auch nach Reload; nach der Landung unter GELANDET) und wird
+von VF-Sync verarbeitet. Er landet **nicht** im Flugbuch (kein DB-Write).
 
 ```
 docker compose run --rm --no-deps api python -m app.vfsync.simulate \
@@ -231,7 +232,7 @@ einen Platz mit regelmäßigem Betrieb konfigurieren).
 |---|---|---|
 | V-00a | Mandant auf den Mock zeigen: `VF_PASSWORD=mock-password VF_APPKEY=mock-appkey docker compose run --rm --no-deps -e VF_PASSWORD -e VF_APPKEY api python -m app.vfsync.tools set-credentials --slug ohlstadt --username mock-user --base-url http://vfmock:8099` | „credentials stored for ohlstadt (encrypted)“ |
 | V-00b | `… tools show --slug ohlstadt` | `enabled False`, `dry_run True`, `has_password True`, `has_appkey True`; **keine** Klartext-Werte |
-| V-00c | `… tools enable --slug ohlstadt` | `enabled, dry_run=True`; `docker compose logs vfsync` zeigt innerhalb 5 min `vfsync_config_changed added=['ohlstadt']` |
+| V-00c | `… tools enable --slug ohlstadt` | `enabled, dry_run=True`; `docker compose logs vfsync` zeigt innerhalb weniger Sekunden `vfsync_config_reload_triggered` und `vfsync_config_changed added=['ohlstadt']` |
 | V-00d | Seite `/dashboard/vfsync` | Badge „Freigeschaltet“, amber „Dry-Run“, Budget 0/450, Worker-Health mit Heartbeat |
 
 ### 8.2 Konfigurations-Seite
@@ -289,7 +290,7 @@ Mock **exakt** wie beim Simulator (`--registration`).
 | V-44 | VF-Flug gelöscht | nach V-30 den Flug im Mock löschen, Rest simulieren | Audit `error` (404) einmal, Session `awaiting_match` mit `vf_flight_deleted`; neuen Flug anlegen → wird beim Retry gematcht |
 | V-45 | Idempotenz | nach V-31 `docker compose restart vfsync` | Keine zusätzlichen `edit`-Zeilen im Mock; Session bleibt `completed` |
 | V-46 | Budget-Stufen | Budget im UI auf 6 setzen; Simulator-Läufe | Ab 60 % keine Live-Startzeit (Session bleibt `tracking`, Bündel nach Landung kommt); bei 100 % Stufe `hard_stop`, Session gequeued, Alarm im Log; Budget-Balken im UI |
-| V-47 | Falsche Credentials | AppKey im UI auf „falsch“ setzen (Worker lädt Config ≤ 5 min), Simulator | Request-Log: signin 403; Log `vfsync_tenant_paused`; keine weiteren Calls; richtigen Key speichern → nach Reload wieder aktiv |
+| V-47 | Falsche Credentials | AppKey im UI auf „falsch“ setzen (Worker übernimmt Änderung sofort), Simulator | Request-Log: signin 403; Log `vfsync_tenant_paused`; keine weiteren Calls; richtigen Key speichern → nach Reload wieder aktiv |
 | V-48 | 400 vom VF | Mock-Flug anlegen, dann in DB-Session `release_alt_agl_m` bleibt – alternativ nur per Entwickler (fail_next); dokumentieren als N/A wenn nicht testbar | Session `review` mit `vf_400`, kein Retry |
 | V-49 | Audit-Ansicht | Session anklicken | Einträge get/edit/match/abstain mit Zeit, flid, gesendeten Feldern, HTTP-Status; `pre_state` ohne Zugangsdaten |
 | V-50 | Sessions-Filter | Datum wechseln, Status-Filter `review` | Liste filtert; Paginierung bei > 50 |
