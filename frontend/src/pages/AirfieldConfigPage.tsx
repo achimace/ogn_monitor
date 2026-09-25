@@ -77,7 +77,7 @@ export default function AirfieldConfigPage() {
   const [success, setSuccess] = useState('')
   const [towPlaneInput, setTowPlaneInput] = useState('')
 
-  useEffect(() => { loadAirfields() }, [])
+  useEffect(() => { loadAirfields() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadAirfields() {
     try {

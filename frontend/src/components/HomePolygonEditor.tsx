@@ -29,7 +29,7 @@ interface Props {
 
 type Mode = 'view' | 'draw' | 'edit'
 
-const OSM_STYLE = {
+const OSM_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
     osm: {
@@ -40,7 +40,7 @@ const OSM_STYLE = {
     },
   },
   layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
-} as const
+}
 
 function ringFromVertices(verts: [number, number][]): GeoJsonPolygon | null {
   if (verts.length < 3) return null
@@ -97,7 +97,7 @@ export default function HomePolygonEditor({
     if (!containerRef.current || mapRef.current) return
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: OSM_STYLE as any,
+      style: OSM_STYLE,
       center: [longitude || 11.18, latitude || 47.39],
       zoom: 14,
     })
@@ -181,7 +181,7 @@ export default function HomePolygonEditor({
       if (modeRef.current !== 'edit') return
       const oe = e.originalEvent as MouseEvent
       if (!oe.shiftKey) return
-      const idx = (e.features?.[0]?.properties as any)?.idx
+      const idx = e.features?.[0]?.properties?.idx
       if (typeof idx !== 'number') return
       const next = vertsRef.current.filter((_, i) => i !== idx)
       setVertices(next)
@@ -194,7 +194,7 @@ export default function HomePolygonEditor({
       const oe = e.originalEvent as MouseEvent
       if (oe.shiftKey) return
       e.preventDefault()
-      draggingIdx = (e.features?.[0]?.properties as any)?.idx ?? null
+      draggingIdx = e.features?.[0]?.properties?.idx ?? null
       map.getCanvas().style.cursor = 'grabbing'
     })
     map.on('mousemove', (e) => {
@@ -224,13 +224,13 @@ export default function HomePolygonEditor({
     map.setCenter([longitude, latitude])
     if (map.getSource('circle')) {
       ;(map.getSource('circle') as maplibregl.GeoJSONSource).setData(
-        circlePolygon(latitude, longitude, radiusM) as any
+        circlePolygon(latitude, longitude, radiusM)
       )
     }
   }, [latitude, longitude, radiusM])
 
   // Redraw whenever vertices change OR the map becomes ready for the first time
-  useEffect(() => { redraw() }, [vertices, mapReady])
+  useEffect(() => { redraw() }, [vertices, mapReady]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Once the map is ready, fit the view to an existing polygon if any
   useEffect(() => {

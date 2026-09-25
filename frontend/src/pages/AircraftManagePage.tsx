@@ -34,12 +34,11 @@ interface AircraftForm {
   flarm_id: string
   aircraft_model: string
   aircraft_type: string
-  is_active: boolean
 }
 
 const EMPTY_FORM: AircraftForm = {
   registration: '', competition_sign: '', flarm_id: '',
-  aircraft_model: '', aircraft_type: 'glider', is_active: true,
+  aircraft_model: '', aircraft_type: 'glider',
 }
 
 const inputClass = 'w-full bg-tower-bg border border-tower-border rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-tower-qdr'
@@ -58,7 +57,7 @@ export default function AircraftManagePage() {
   const [importResult, setImportResult] = useState<CsvImportResult | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  useEffect(() => { loadAirfield() }, [])
+  useEffect(() => { loadAirfield() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadAirfield() {
     try {
@@ -104,7 +103,6 @@ export default function AircraftManagePage() {
       flarm_id: ac.flarm_id,
       aircraft_model: ac.aircraft_model ?? '',
       aircraft_type: ac.aircraft_type || 'glider',
-      is_active: ac.is_active,
     })
     setShowForm(true)
   }

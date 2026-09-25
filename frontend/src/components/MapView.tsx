@@ -268,13 +268,16 @@ export default function MapView({
     // size when the layout switches between "Karte" and "Split".
     const observer = new ResizeObserver(() => map.resize())
     observer.observe(mapContainer.current)
+    // markersRef always holds the same Map object; capture it so the cleanup
+    // does not read the ref after unmount (react-hooks/exhaustive-deps).
+    const markers = markersRef.current
 
     return () => {
       observer.disconnect()
       trackAbortRef.current?.abort()
       map.remove()
       mapRef.current = null
-      markersRef.current.clear()
+      markers.clear()
     }
   }, [airfieldLat, airfieldLng, airfieldName])
 
@@ -368,7 +371,6 @@ export default function MapView({
     return () => {
       controller.abort()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusFlarmId, mapReady, airfieldSlug])
 
   // Update aircraft markers
@@ -650,26 +652,67 @@ function createMarkerElement(trackDeg: number, color: string, label: string, isA
   return el
 }
 
+/**
+ * Build the static marker DOM once. Data-derived values (label, colour,
+ * heading) are applied in updateMarkerElement via textContent / style
+ * properties, never via innerHTML, so a registration or FLARM id from the
+ * DDB / tenant forms cannot inject markup.
+ */
+function buildMarkerDom(el: HTMLElement): { labelEl: HTMLDivElement; arrowEl: HTMLDivElement } {
+  const wrapper = document.createElement('div')
+  wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)'
+
+  const labelEl = document.createElement('div')
+  labelEl.style.cssText = 'color:white;padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold;margin-bottom:2px'
+
+  const arrowEl = document.createElement('div')
+  arrowEl.style.cssText = 'width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;filter:drop-shadow(0 0 2px rgba(0,0,0,0.5))'
+
+  wrapper.appendChild(labelEl)
+  wrapper.appendChild(arrowEl)
+  el.replaceChildren(wrapper)
+  return { labelEl, arrowEl }
+}
+
 function updateMarkerElement(el: HTMLElement, trackDeg: number, color: string, label: string, isAlarm: boolean, isFocused: boolean) {
+  // Reuse the existing structure on every beacon; build it only once.
+  const wrapper = el.firstElementChild
+  let labelEl = wrapper?.firstElementChild as HTMLDivElement | null | undefined
+  let arrowEl = wrapper?.lastElementChild as HTMLDivElement | null | undefined
+  if (!labelEl || !arrowEl || labelEl === arrowEl) {
+    ({ labelEl, arrowEl } = buildMarkerDom(el))
+  }
+
   // Focused aircraft: slightly larger label with a white ring so it stands out.
-  const fontSize = isFocused ? '12px' : '10px'
-  const ring = isFocused ? ';box-shadow:0 0 0 2px #fff, 0 0 6px rgba(0,0,0,0.6)' : ''
-  el.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)">
-      <div style="font-size:${fontSize};color:white;background:${color};padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold;margin-bottom:2px${ring}${isAlarm ? ';animation:pulse 0.5s ease-in-out infinite' : ''}">${label}</div>
-      <div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:16px solid ${color};transform:rotate(${trackDeg}deg);filter:drop-shadow(0 0 2px rgba(0,0,0,0.5))"></div>
-    </div>
-  `
+  labelEl.textContent = label
+  labelEl.style.fontSize = isFocused ? '12px' : '10px'
+  labelEl.style.background = color
+  labelEl.style.boxShadow = isFocused ? '0 0 0 2px #fff, 0 0 6px rgba(0,0,0,0.6)' : ''
+  labelEl.style.animation = isAlarm ? 'pulse 0.5s ease-in-out infinite' : ''
+
+  const heading = Number.isFinite(trackDeg) ? trackDeg : 0
+  arrowEl.style.borderBottom = `16px solid ${color}`
+  arrowEl.style.transform = `rotate(${heading}deg)`
 }
 
 function addAirfieldMarker(map: maplibregl.Map, lat: number, lng: number, name: string) {
   const el = document.createElement('div')
-  el.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center">
-      <div style="font-size:11px;color:#fff;background:#1e40af;padding:2px 6px;border-radius:4px;font-weight:bold;margin-bottom:4px">${name || 'HOME'}</div>
-      <div style="width:12px;height:12px;background:#1e40af;border:2px solid white;border-radius:50%"></div>
-    </div>
-  `
+
+  const wrapper = document.createElement('div')
+  wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center'
+
+  const labelEl = document.createElement('div')
+  labelEl.style.cssText = 'font-size:11px;color:#fff;background:#1e40af;padding:2px 6px;border-radius:4px;font-weight:bold;margin-bottom:4px'
+  // Tenant-provided airfield name: textContent only, never markup.
+  labelEl.textContent = name || 'HOME'
+
+  const dotEl = document.createElement('div')
+  dotEl.style.cssText = 'width:12px;height:12px;background:#1e40af;border:2px solid white;border-radius:50%'
+
+  wrapper.appendChild(labelEl)
+  wrapper.appendChild(dotEl)
+  el.appendChild(wrapper)
+
   new maplibregl.Marker({ element: el, anchor: 'bottom' })
     .setLngLat([lng, lat])
     .addTo(map)
