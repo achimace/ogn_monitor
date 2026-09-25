@@ -18,8 +18,10 @@ interface AuthState {
   loading: boolean
   error: string | null
 
-  login: (email: string, password: string) => Promise<void>
-  register: (email: string, password: string, tenantName: string, disclaimerAccepted: boolean) => Promise<void>
+  /** Resolves to true only if THIS call obtained a token. */
+  login: (email: string, password: string) => Promise<boolean>
+  /** Resolves to true only if THIS call obtained a token. */
+  register: (email: string, password: string, tenantName: string, disclaimerAccepted: boolean) => Promise<boolean>
   logout: () => void
   loadUser: () => Promise<void>
   clearError: () => void
@@ -39,9 +41,11 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ token: data.access_token, loading: false })
       // Load user profile after login
       useAuthStore.getState().loadUser()
+      return true
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : 'Login fehlgeschlagen'
       set({ loading: false, error: msg })
+      return false
     }
   },
 
@@ -60,9 +64,11 @@ export const useAuthStore = create<AuthState>((set) => ({
       localStorage.setItem('token', data.access_token)
       set({ token: data.access_token, loading: false })
       useAuthStore.getState().loadUser()
+      return true
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : 'Registrierung fehlgeschlagen'
       set({ loading: false, error: msg })
+      return false
     }
   },
 
@@ -75,10 +81,15 @@ export const useAuthStore = create<AuthState>((set) => ({
     try {
       const user = await api.get<User>('/auth/me')
       set({ user })
-    } catch {
-      // Token invalid - logout
-      localStorage.removeItem('token')
-      set({ token: null, user: null })
+    } catch (e) {
+      // Only a rejected token (401/403) means logout. Aborted fetches
+      // (page reload), network errors or 5xx must keep the session.
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        localStorage.removeItem('token')
+        set({ token: null, user: null })
+        return
+      }
+      console.warn('loadUser: profile fetch failed, keeping session', e)
     }
   },
 

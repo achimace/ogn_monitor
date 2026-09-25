@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { useAuthStore } from '../store/authStore'
 
 const DISCLAIMER_TEXT = `WICHTIGER HINWEIS:
 
@@ -60,9 +59,10 @@ export default function RegisterPage() {
       return
     }
 
-    await register(email, password, tenantName, disclaimerAccepted)
-    // Check store directly (not via hook) after async register
-    if (useAuthStore.getState().token) {
+    // Success is decided by this call, not by a stale token in localStorage
+    // (otherwise a 409 "E-Mail bereits registriert" would be hidden by a redirect)
+    const ok = await register(email, password, tenantName, disclaimerAccepted)
+    if (ok) {
       navigate('/dashboard')
     }
   }
