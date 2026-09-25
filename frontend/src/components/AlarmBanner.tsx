@@ -5,10 +5,23 @@ import { useRef, useEffect } from 'react'
 import { useMonitorStore, type AlarmEvent } from '../store/monitorStore'
 
 export default function AlarmBanner() {
-  const alarms = useMonitorStore((s) => s.alarms)
+  const allAlarms = useMonitorStore((s) => s.alarms)
+  const flights = useMonitorStore((s) => s.flights)
   const acknowledgeAlarm = useMonitorStore((s) => s.acknowledgeAlarm)
   const clearAlarm = useMonitorStore((s) => s.clearAlarm)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  // B2: as soon as the tower crew has handled an alarm in any way (alarmState
+  // set on the flight – including a plain "acknowledged"), the alarm leaves
+  // the blinking banner permanently; it stays visible in the table sections
+  // and the detail drawer. The one exception is an escalation: if the
+  // flight's status becomes `emergency` after the handling, the alarm is
+  // shown in the banner again regardless of alarmState.
+  const alarms = allAlarms.filter((a) => {
+    const flight = flights.get(a.flarmId)
+    if (flight?.status === 'emergency') return true
+    return !flight?.alarmState
+  })
 
   // Unacknowledged alarms trigger audio
   const unacked = alarms.filter((a) => !a.acknowledged)

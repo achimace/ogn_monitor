@@ -5,7 +5,11 @@
  * Handles WebSocket delta updates efficiently.
  */
 import { create } from 'zustand'
-import type { Flight, FlightDelta, FlightStats, AlarmPosition, AlarmSeverity, SignalLossScenario } from '../types/flight'
+import type {
+  Flight, FlightDelta, FlightStats, AlarmPosition, AlarmSeverity, SignalLossScenario,
+  AlarmState, AlarmStateFields,
+} from '../types/flight'
+import { ALARM_STATES } from '../types/flight'
 
 /** Status number to string mapping (from backend IntEnum) */
 const STATUS_MAP: Record<number, Flight['status']> = {
@@ -81,12 +85,36 @@ interface MonitorState {
   addAlarm: (alarm: Omit<AlarmEvent, 'acknowledged'>) => void
   acknowledgeAlarm: (flarmId: string) => void
   clearAlarm: (flarmId: string) => void
+  /**
+   * Merge the tower alarm-handling fields (B2) into a flight. Used by the
+   * detail drawer after a successful POST (optimistic update); other clients
+   * receive the same fields via the regular `flight_update` delta.
+   * Also patches an archived copy.
+   */
+  applyAlarmState: (flarmId: string, fields: AlarmStateFields) => void
   setConnected: (connected: boolean) => void
 
   // Computed
   getFlightsByStatus: (...statuses: Flight['status'][]) => Flight[]
   getAlarmFlights: () => Flight[]
   getCombinedFlights: () => Flight[]
+}
+
+/** Coerce an unknown value to a known AlarmState (or null). */
+export function normalizeAlarmState(val: unknown): AlarmState | null {
+  if (typeof val !== 'string') return null
+  return (ALARM_STATES as readonly string[]).includes(val) ? (val as AlarmState) : null
+}
+
+/** Pick the four alarm-handling fields from a raw hot-state/API object
+ *  (camelCase). Fields the backend does not send stay undefined. */
+export function pickAlarmFields(raw: Record<string, unknown>): AlarmStateFields {
+  const out: AlarmStateFields = {}
+  if ('alarmState' in raw) out.alarmState = normalizeAlarmState(raw.alarmState)
+  if ('alarmComment' in raw) out.alarmComment = raw.alarmComment ? String(raw.alarmComment) : null
+  if ('alarmSetBy' in raw) out.alarmSetBy = raw.alarmSetBy ? String(raw.alarmSetBy) : null
+  if ('alarmSetAt' in raw) out.alarmSetAt = raw.alarmSetAt ? String(raw.alarmSetAt) : null
+  return out
 }
 
 function normalizeFlightData(raw: Record<string, unknown>): Flight {
@@ -129,6 +157,7 @@ function normalizeFlightData(raw: Record<string, unknown>): Flight {
     launchType: (raw.launchType as Flight['launchType']) || null,
     towPlaneReg: raw.towPlaneReg ? String(raw.towPlaneReg) : null,
     releaseAltM: raw.releaseAltM ? Number(raw.releaseAltM) : null,
+    ...pickAlarmFields(raw),
   }
 }
 
@@ -183,6 +212,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
           } else {
             updated.status = val as Flight['status']
           }
+        } else if (key === 'alarmState') {
+          updated.alarmState = normalizeAlarmState(val)
         } else {
           (updated as Record<string, unknown>)[key] = val
         }
@@ -227,6 +258,33 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     set((state) => ({
       alarms: state.alarms.filter((a) => a.flarmId !== flarmId),
     }))
+  },
+
+  applyAlarmState: (flarmId, fields) => {
+    const patch: AlarmStateFields = {}
+    if (fields.alarmState !== undefined) patch.alarmState = normalizeAlarmState(fields.alarmState)
+    if (fields.alarmComment !== undefined) patch.alarmComment = fields.alarmComment ?? null
+    if (fields.alarmSetBy !== undefined) patch.alarmSetBy = fields.alarmSetBy ?? null
+    if (fields.alarmSetAt !== undefined) patch.alarmSetAt = fields.alarmSetAt ?? null
+    if (Object.keys(patch).length === 0) return
+
+    const state = get()
+    const live = state.flights.get(flarmId)
+    const inArchive = state.archivedToday.some((f) => f.flarmId === flarmId)
+    if (!live && !inArchive) return
+
+    const update: Partial<MonitorState> = { lastUpdate: new Date().toISOString() }
+    if (live) {
+      const flights = new Map(state.flights)
+      flights.set(flarmId, { ...live, ...patch })
+      update.flights = flights
+    }
+    if (inArchive) {
+      update.archivedToday = state.archivedToday.map((f) =>
+        f.flarmId === flarmId ? { ...f, ...patch } : f
+      )
+    }
+    set(update)
   },
 
   setTodayData: (archived, stats, stripFields) => {

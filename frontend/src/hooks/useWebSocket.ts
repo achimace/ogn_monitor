@@ -2,7 +2,8 @@
  * WebSocket hook with auto-reconnect and delta merge into Zustand store.
  *
  * Connects to ws://host/ws/monitor/{slug}
- * Handles: full_state, flight_update, flight_added, flight_removed, alarm, ping/pong
+ * Handles: full_state, flight_update, flight_added, flight_removed, alarm,
+ *          ping/pong
  */
 import { useEffect, useRef, useCallback } from 'react'
 import { useMonitorStore } from '../store/monitorStore'
@@ -77,6 +78,8 @@ export function useWebSocket(slug: string | null) {
         break
 
       case 'flight_update':
+        // Tower alarm handling (B2): alarm_* fields arrive as part of this
+        // delta and are merged by applyDelta – there is no separate event.
         applyDelta(msg.flarmId, msg.d)
         break
 

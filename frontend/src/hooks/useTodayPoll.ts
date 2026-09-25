@@ -8,7 +8,7 @@
  * supplements with archived data and aggregates.
  */
 import { useEffect } from 'react'
-import { useMonitorStore, type DayStats, type StripField, ALL_STRIP_FIELDS } from '../store/monitorStore'
+import { useMonitorStore, type DayStats, type StripField, ALL_STRIP_FIELDS, pickAlarmFields } from '../store/monitorStore'
 import type { Flight } from '../types/flight'
 
 const POLL_INTERVAL_MS = 30_000
@@ -57,6 +57,7 @@ function rawToFlight(raw: Record<string, unknown>): Flight {
     launchType: (raw.launchType as Flight['launchType']) || null,
     towPlaneReg: null,
     releaseAltM: null,
+    ...pickAlarmFields(raw),
   }
 }
 

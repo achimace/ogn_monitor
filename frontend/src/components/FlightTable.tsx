@@ -8,6 +8,7 @@
  */
 import type { Flight } from '../types/flight'
 import StatusBadge from './StatusBadge'
+import AlarmStateBadge from './AlarmStateBadge'
 import ClimbIndicator from './ClimbIndicator'
 import type { StripField } from '../store/monitorStore'
 import { ALL_STRIP_FIELDS } from '../store/monitorStore'
@@ -166,6 +167,11 @@ function FlightRow({ flight, bgColor, handlers, show }: {
     </button>
   ) : null
 
+  // Tower alarm-handling state (B2) – muted badge stacked under the status.
+  const alarmStateBadge = flight.alarmState ? (
+    <AlarmStateBadge state={flight.alarmState} />
+  ) : null
+
   return (
     <div
       onClick={handleClick}
@@ -193,6 +199,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
           </div>
           <div className="flex flex-col items-end gap-1.5 shrink-0">
             <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+            {alarmStateBadge}
             {detailsButton}
           </div>
         </div>
@@ -317,10 +324,12 @@ function FlightRow({ flight, bgColor, handlers, show }: {
           )}
         </div>
 
-        {/* Column 4: Status, with the Details button (split view only) stacked
-            underneath so the row keeps its width. */}
+        {/* Column 4: Status, with the alarm-handling badge and the Details
+            button (split view only) stacked underneath so the row keeps its
+            width. */}
         <div className="w-20 shrink-0 flex flex-col items-center gap-1">
           <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+          {alarmStateBadge}
           {detailsButton}
         </div>
       </div>

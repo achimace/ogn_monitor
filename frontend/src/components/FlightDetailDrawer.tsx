@@ -8,6 +8,8 @@ import { useEffect, useState } from 'react'
 import type { Flight } from '../types/flight'
 import { api, ApiError } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
+import AlarmHandlingSection from './AlarmHandlingSection'
+import { isAlarmHandlingRelevant } from '../lib/alarmHandling'
 
 interface Props {
   flight: Flight | null
@@ -139,6 +141,11 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
               In Google Maps öffnen ↗
             </a>
           </div>
+        )}
+
+        {/* Tower alarm handling (B2): state visible to everyone, actions need a login */}
+        {isAlarmHandlingRelevant(flight) && (
+          <AlarmHandlingSection flight={flight} airfieldSlug={airfieldSlug} />
         )}
 
         {/* Operations actions (only for logged-in airfield owners) */}

@@ -32,7 +32,72 @@ export type SignalLossScenario =
   | 'EMERGENCY'
   | 'SIGNAL_LOST'
 
-export interface Flight {
+/** Tower-side handling state of an alarm (B2). Absent/null = unhandled. */
+export type AlarmState =
+  | 'acknowledged'
+  | 'retrieval_underway'
+  | 'resolved'
+  | 'false_alarm'
+
+export const ALARM_STATES: readonly AlarmState[] = [
+  'acknowledged',
+  'retrieval_underway',
+  'resolved',
+  'false_alarm',
+] as const
+
+export const ALARM_STATE_LABELS: Record<AlarmState, string> = {
+  acknowledged: 'Quittiert',
+  retrieval_underway: 'Rückholung unterwegs',
+  resolved: 'Erledigt',
+  false_alarm: 'Fehlalarm',
+}
+
+/** The four alarm-handling fields carried by hot-state flights (all optional). */
+export interface AlarmStateFields {
+  alarmState?: AlarmState | null
+  alarmComment?: string | null
+  alarmSetBy?: string | null
+  /** ISO-8601 timestamp (UTC, "Z") */
+  alarmSetAt?: string | null
+}
+
+/** One entry of the alarm-action history (GET …/flights/{flarmId}/actions). */
+export interface AlarmActionItem {
+  /** UUID */
+  id: string
+  state: AlarmState
+  comment: string | null
+  alarmKind: string | null
+  setBy: string | null
+  createdAt: string
+  flightTakeoffTs: string | null
+}
+
+export interface AlarmActionsResponse {
+  items: AlarmActionItem[]
+  count: number
+}
+
+/** Body of POST …/flights/{flarmId}/actions */
+export interface AlarmActionRequest {
+  state: AlarmState
+  comment?: string
+  alarm_kind?: string
+}
+
+/** 201 response of POST …/flights/{flarmId}/actions */
+export interface AlarmActionResponse {
+  action: AlarmActionItem
+  alarmState: {
+    alarmState: AlarmState
+    alarmComment: string | null
+    alarmSetBy: string | null
+    alarmSetAt: string
+  }
+}
+
+export interface Flight extends AlarmStateFields {
   flarmId: string
   registration: string | null
   aircraftModel: string | null
