@@ -20,13 +20,15 @@ const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; b
 interface StatusBadgeProps {
   status: FlightStatus
   elapsedMinutes?: number
+  /** Small text under the badge, e.g. the foreign landing airfield ("LDG" + "EDMU"). */
+  sublabel?: string
 }
 
-export default function StatusBadge({ status, elapsedMinutes }: StatusBadgeProps) {
+export default function StatusBadge({ status, elapsedMinutes, sublabel }: StatusBadgeProps) {
   const config = STATUS_CONFIG[status] ?? STATUS_CONFIG['ground']!
 
   return (
-    <div className="flex flex-col items-center gap-1">
+    <div className="flex flex-col items-center gap-1 min-w-0 max-w-full">
       <span
         className={`px-2.5 py-1 rounded text-xs font-bold uppercase ${config.bg} ${config.text} ${
           config.blink ? 'animate-pulse' : ''
@@ -34,6 +36,14 @@ export default function StatusBadge({ status, elapsedMinutes }: StatusBadgeProps
       >
         {config.label}
       </span>
+      {sublabel && (
+        <span
+          className={`text-[10px] leading-tight text-center max-w-full truncate ${config.text}`}
+          title={sublabel}
+        >
+          {sublabel}
+        </span>
+      )}
       {elapsedMinutes !== undefined && elapsedMinutes > 0 && (
         <span className="text-[10px] text-gray-500">{elapsedMinutes} min</span>
       )}

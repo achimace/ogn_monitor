@@ -32,6 +32,31 @@ interface FlightLog {
   max_distance_m: number
   launch_type: string | null
   end_status: string
+  // Airfield attribution – optional, the backend may not send these yet.
+  // The contract names them camelCase; the snake_case variants are accepted
+  // too because the rest of the item is snake_case.
+  takeoffAirfield?: string | null
+  landingAirfield?: string | null
+  landingType?: string | null
+  takeoff_airfield?: string | null
+  landing_airfield?: string | null
+  landing_type?: string | null
+}
+
+function takeoffAirfieldOf(log: FlightLog): string {
+  return log.takeoffAirfield || log.takeoff_airfield || ''
+}
+
+function landingTypeOf(log: FlightLog): string {
+  return log.landingType || log.landing_type || ''
+}
+
+/** Landing airfield for display; outlandings without a name say so. */
+function landingAirfieldOf(log: FlightLog): string {
+  const name = log.landingAirfield || log.landing_airfield || ''
+  if (name) return name
+  if (landingTypeOf(log) === 'outlanding' || log.end_status === 'outlanding') return 'Außenlandung'
+  return ''
 }
 
 interface PagedResult {
@@ -195,15 +220,30 @@ export default function FlightLogPage() {
                   <td className="px-4 py-2.5 text-white font-medium">{log.registration || '-'}</td>
                   <td className="px-4 py-2.5 text-gray-300">{log.competition_sign || '-'}</td>
                   <td className="px-4 py-2.5 text-gray-400 text-xs">{log.aircraft_model || '-'}</td>
-                  <td className="px-4 py-2.5 text-gray-300 font-mono">{formatTime(log.takeoff_time)}</td>
-                  <td className="px-4 py-2.5 text-gray-300 font-mono">{formatTime(log.landing_time)}</td>
+                  <td className="px-4 py-2.5 text-gray-300 font-mono">
+                    <div>{formatTime(log.takeoff_time)}</div>
+                    {takeoffAirfieldOf(log) && (
+                      <div className="text-gray-500 text-[10px] font-sans leading-tight max-w-[10rem] truncate" title={takeoffAirfieldOf(log)}>
+                        {takeoffAirfieldOf(log)}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 text-gray-300 font-mono">
+                    <div>{formatTime(log.landing_time)}</div>
+                    {log.landing_time && landingAirfieldOf(log) && (
+                      <div className="text-gray-500 text-[10px] font-sans leading-tight max-w-[10rem] truncate" title={landingAirfieldOf(log)}>
+                        {landingAirfieldOf(log)}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-4 py-2.5 text-gray-300 font-mono">{formatDuration(log.flight_duration_s)}</td>
                   <td className="px-4 py-2.5 text-tower-altitude font-mono">{log.max_altitude_m}m</td>
                   <td className="px-4 py-2.5 text-tower-distance font-mono">{(log.max_distance_m / 1000).toFixed(1)}km</td>
                   <td className="px-4 py-2.5 text-gray-300">{formatLaunch(log.launch_type)}</td>
                   <td className="px-4 py-2.5">
                     <span className={`px-2 py-0.5 rounded text-xs ${
-                      log.end_status === 'landing' ? 'bg-green-900/50 text-green-300' :
+                      log.end_status === 'landing' || log.end_status === 'home' || log.end_status === 'foreign'
+                        ? 'bg-green-900/50 text-green-300' :
                       log.end_status === 'outlanding' ? 'bg-orange-900/50 text-orange-300' :
                       'bg-gray-800 text-gray-400'
                     }`}>

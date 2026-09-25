@@ -54,6 +54,11 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
   const landing = formatTime(flight.landingTime)
   const duration = computeDuration(flight)
   const elapsedMin = flight.elapsedS > 0 ? Math.floor(flight.elapsedS / 60) : 0
+  const takeoffAirfield = flight.takeoffAirfield || 'unbekannt'
+  // "Landeplatz" only makes sense once the flight is on the ground.
+  const landed = isLanded(flight)
+  const landingAirfield = flight.landingAirfield
+    || (flight.landingType === 'outlanding' ? 'Außenlandung' : '—')
 
   return (
     <>
@@ -76,8 +81,17 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
         {/* Header */}
         <div className="px-5 py-4 border-b border-tower-border flex items-start justify-between gap-3">
           <div>
-            <div className="text-2xl font-bold leading-tight">
-              {flight.registration || flight.flarmId}
+            <div className="text-2xl font-bold leading-tight flex items-center gap-2 flex-wrap">
+              <span>{flight.registration || flight.flarmId}</span>
+              {flight.isVisitor && (
+                <span
+                  className="px-2 py-0.5 rounded bg-sky-900/60 border border-sky-700/60 text-sky-200
+                    text-xs font-semibold uppercase tracking-wider align-middle"
+                  title={`Besucher – gestartet in ${takeoffAirfield}`}
+                >
+                  Besucher
+                </span>
+              )}
             </div>
             {flight.competitionSign && (
               <div className="text-tower-qdr text-sm font-mono">{flight.competitionSign}</div>
@@ -118,7 +132,9 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
         {/* Timeline */}
         <div className="px-5 py-4 space-y-2 text-sm border-b border-tower-border">
           <Row label="Start" value={takeoff} />
+          <Row label="Startplatz" value={takeoffAirfield} mono={false} />
           {landing && <Row label="Landung" value={landing} />}
+          {landed && <Row label="Landeplatz" value={landingAirfield} mono={false} />}
           {duration && <Row label="Dauer" value={duration} />}
           {flight.launchType && <Row label="Startart" value={launchLabel(flight.launchType)} />}
           {flight.maxAltitudeM > 0 && <Row label="Max. Höhe" value={`${flight.maxAltitudeM} m`} />}
@@ -187,13 +203,19 @@ function Stat({ label, value, hint, color }: { label: string; value: string; hin
   )
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex justify-between">
-      <span className="text-gray-500">{label}</span>
-      <span className="text-gray-100 font-mono">{value}</span>
+    <div className="flex justify-between gap-4">
+      <span className="text-gray-500 shrink-0">{label}</span>
+      <span className={`text-gray-100 text-right ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   )
+}
+
+/** On the ground after a flight – at home, at a foreign field or in the field. */
+function isLanded(f: Flight): boolean {
+  if (f.status === 'landing' || f.status === 'ground' || f.status === 'outlanding') return true
+  return !!f.landingTime
 }
 
 function formatTime(iso: string | null): string {

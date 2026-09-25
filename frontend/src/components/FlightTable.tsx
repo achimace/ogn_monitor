@@ -55,8 +55,13 @@ export default function FlightTable({ flights, onSelect, onFocus, onDetails, foc
   // the strip appears the moment the aircraft is airborne — same moment
   // it turns blue on the map.
   const flying = sorted.filter((f) => f.status === 'flying' || f.status === 'takeoff')
-  const outlanding = sorted.filter((f) => ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status))
-  const landed = sorted.filter((f) => ['landing', 'ground'].includes(f.status))
+  // A landing at a known foreign airfield (landingType 'foreign') is a
+  // regular landing ("GELANDET" with the field name), never an outlanding –
+  // regardless of which status the backend attached to it.
+  const outlanding = sorted.filter((f) =>
+    ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status) && !isForeignLanding(f))
+  const landed = sorted.filter((f) =>
+    ['landing', 'ground'].includes(f.status) || isForeignLanding(f))
 
   return (
     <div className="space-y-3">
@@ -146,6 +151,16 @@ function FlightRow({ flight, bgColor, handlers, show }: {
   const launchLabel = formatLaunchType(flight.launchType)
   const elapsedMin = flight.elapsedS > 0 ? Math.floor(flight.elapsedS / 60) : undefined
 
+  // Landing at a known foreign airfield: badge stays "LDG", the field name
+  // goes underneath (desktop) or into the meta line (mobile).
+  const foreignLanding = isForeignLanding(flight)
+  const foreignField = foreignLanding ? (flight.landingAirfield || 'fremder Platz') : ''
+  const badgeStatus: Flight['status'] = foreignLanding ? 'landing' : flight.status
+  // Visitor: took off elsewhere and arrived here.
+  const visitorHint = flight.isVisitor
+    ? (flight.takeoffAirfield ? `Besucher von ${flight.takeoffAirfield}` : 'Besucher')
+    : ''
+
   // Split view: the row click focuses the map (onFocus) and the drawer is
   // reached via the "Details" button. Plain table view: row click = drawer.
   const rowAction = onFocus || onSelect
@@ -191,14 +206,18 @@ function FlightRow({ flight, bgColor, handlers, show }: {
               {[
                 show('takeoff_time') && takeoffStr ? `Start ${takeoffStr}` : '',
                 show('landing_time') && landingStr ? `Landung ${landingStr}` : '',
+                foreignField ? `in ${foreignField}` : '',
                 show('duration') && durationStr,
                 show('launch_type') && launchLabel,
                 show('aircraft_model') && flight.aircraftModel,
               ].filter(Boolean).join(' · ')}
             </div>
+            {visitorHint && (
+              <div className="text-sky-300 text-xs truncate">{visitorHint}</div>
+            )}
           </div>
           <div className="flex flex-col items-end gap-1.5 shrink-0">
-            <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+            <StatusBadge status={badgeStatus} elapsedMinutes={elapsedMin} />
             {alarmStateBadge}
             {detailsButton}
           </div>
@@ -251,6 +270,11 @@ function FlightRow({ flight, bgColor, handlers, show }: {
           )}
           {show('aircraft_model') && flight.aircraftModel && (
             <div className="text-gray-500 text-[10px]">{flight.aircraftModel}</div>
+          )}
+          {visitorHint && (
+            <div className="text-sky-300 text-[10px] leading-tight truncate" title={visitorHint}>
+              {visitorHint}
+            </div>
           )}
         </div>
 
@@ -328,13 +352,23 @@ function FlightRow({ flight, bgColor, handlers, show }: {
             button (split view only) stacked underneath so the row keeps its
             width. */}
         <div className="w-20 shrink-0 flex flex-col items-center gap-1">
-          <StatusBadge status={flight.status} elapsedMinutes={elapsedMin} />
+          <StatusBadge status={badgeStatus} elapsedMinutes={elapsedMin} sublabel={foreignField || undefined} />
           {alarmStateBadge}
           {detailsButton}
         </div>
       </div>
     </div>
   )
+}
+
+/**
+ * Landed at a known foreign airfield. The contract sends this as status
+ * `landing` + `landingType: 'foreign'`; the status check keeps airborne
+ * flights (landingType still set from a previous leg) out of it.
+ */
+function isForeignLanding(f: Flight): boolean {
+  if (f.landingType !== 'foreign') return false
+  return ['landing', 'ground', 'outlanding', 'outlanding_pending', 'diverted'].includes(f.status)
 }
 
 function formatHM(iso: string | null): string {

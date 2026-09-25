@@ -53,6 +53,27 @@ export const ALARM_STATE_LABELS: Record<AlarmState, string> = {
   false_alarm: 'Fehlalarm',
 }
 
+/**
+ * Where a flight ended: at the home airfield, at a foreign airfield
+ * (known field, not an outlanding), in the field, or not yet landed ("").
+ * Kept open to plain `string` so an unknown backend value never breaks the UI.
+ */
+export type LandingType = 'home' | 'foreign' | 'outlanding' | ''
+
+/**
+ * Airfield attribution of a flight (all optional – the backend may not
+ * send them yet, and a delta may carry only some of them).
+ */
+export interface AirfieldFields {
+  /** Name/ICAO of the takeoff airfield, e.g. "DASSU", "Gundelfingen (EDMU)", "unbekannt" */
+  takeoffAirfield?: string
+  /** Name/ICAO of the landing airfield (empty while airborne) */
+  landingAirfield?: string
+  landingType?: LandingType | string
+  /** True when the aircraft took off elsewhere and arrived at this airfield */
+  isVisitor?: boolean
+}
+
 /** The four alarm-handling fields carried by hot-state flights (all optional). */
 export interface AlarmStateFields {
   alarmState?: AlarmState | null
@@ -97,7 +118,7 @@ export interface AlarmActionResponse {
   }
 }
 
-export interface Flight extends AlarmStateFields {
+export interface Flight extends AlarmStateFields, AirfieldFields {
   flarmId: string
   registration: string | null
   aircraftModel: string | null

@@ -7,7 +7,7 @@
 import { create } from 'zustand'
 import type {
   Flight, FlightDelta, FlightStats, AlarmPosition, AlarmSeverity, SignalLossScenario,
-  AlarmState, AlarmStateFields,
+  AlarmState, AlarmStateFields, AirfieldFields,
 } from '../types/flight'
 import { ALARM_STATES } from '../types/flight'
 
@@ -117,6 +117,31 @@ export function pickAlarmFields(raw: Record<string, unknown>): AlarmStateFields 
   return out
 }
 
+/**
+ * Coerce a Redis-style flag to boolean. The hot state stores flags as
+ * "1"/"0" strings; JSON payloads may already carry true/false or 1/0.
+ */
+export function toBool(val: unknown): boolean {
+  if (typeof val === 'boolean') return val
+  if (typeof val === 'number') return val !== 0
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes'
+  }
+  return false
+}
+
+/** Pick the airfield-attribution fields from a raw hot-state/API object
+ *  (camelCase). Fields the backend does not send stay undefined. */
+export function pickAirfieldFields(raw: Record<string, unknown>): AirfieldFields {
+  const out: AirfieldFields = {}
+  if ('takeoffAirfield' in raw) out.takeoffAirfield = raw.takeoffAirfield ? String(raw.takeoffAirfield) : ''
+  if ('landingAirfield' in raw) out.landingAirfield = raw.landingAirfield ? String(raw.landingAirfield) : ''
+  if ('landingType' in raw) out.landingType = raw.landingType ? String(raw.landingType) : ''
+  if ('isVisitor' in raw) out.isVisitor = toBool(raw.isVisitor)
+  return out
+}
+
 function normalizeFlightData(raw: Record<string, unknown>): Flight {
   const statusRaw = raw.status
   let status: Flight['status'] = 'ground'
@@ -158,6 +183,7 @@ function normalizeFlightData(raw: Record<string, unknown>): Flight {
     towPlaneReg: raw.towPlaneReg ? String(raw.towPlaneReg) : null,
     releaseAltM: raw.releaseAltM ? Number(raw.releaseAltM) : null,
     ...pickAlarmFields(raw),
+    ...pickAirfieldFields(raw),
   }
 }
 
@@ -214,6 +240,9 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
           }
         } else if (key === 'alarmState') {
           updated.alarmState = normalizeAlarmState(val)
+        } else if (key === 'isVisitor') {
+          // Redis flag "1"/"0" (or boolean) – keep the store boolean-only
+          updated.isVisitor = toBool(val)
         } else {
           (updated as Record<string, unknown>)[key] = val
         }

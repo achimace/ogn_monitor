@@ -3,7 +3,8 @@
  *
  * Connects to ws://host/ws/monitor/{slug}
  * Handles: full_state, flight_update, flight_added, flight_removed, alarm,
- *          ping/pong
+ *          ping/pong. Visitors (takeoff elsewhere) arrive as flight_added
+ *          with eventType "visitor_arrived" – the server maps the event.
  */
 import { useEffect, useRef, useCallback } from 'react'
 import { useMonitorStore } from '../store/monitorStore'
