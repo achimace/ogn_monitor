@@ -20,7 +20,7 @@ from app.tracking.flight_profile_buffer import FlightProfileBuffer
 from app.tracking.flight_state import FlightState, FlightStatus
 from app.tracking.flight_state_machine import AirfieldConfig, FlightStateMachine
 from app.tracking.launch_detector import LaunchDetector
-from app.tracking.redis_writer import RedisWriter
+from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE, RedisWriter
 
 log = structlog.get_logger()
 
@@ -255,6 +255,11 @@ class FlightTracker:
     async def recover_from_redis(self) -> int:
         """Recover active flights from Redis on worker restart.
 
+        Simulated flights (``app.vfsync.simulate``, hash field
+        ``simulated=1``) are skipped and left in Redis: they stay visible
+        in the monitor until their TTL expires but must never enter the
+        state machine (and thus flight_status / flight_log).
+
         Returns number of restored flights.
         """
         count = 0
@@ -263,6 +268,9 @@ class FlightTracker:
             for fid in flarm_ids:
                 data = await self.redis_writer.get_flight(slug, fid)
                 if data:
+                    if data.get(SIMULATED_FIELD) == SIMULATED_VALUE:
+                        log.info("flight_recovery_skipped_simulated", slug=slug, flarm_id=fid)
+                        continue
                     flight = FlightState.from_redis(data, slug)
                     if flight.flarm_id:
                         config = self._configs.get(slug)

@@ -22,6 +22,13 @@ from app.config import settings
 
 log = structlog.get_logger()
 
+# Optional field in the flight hash marking a synthetic flight written by
+# ``app.vfsync.simulate``. The API shows such flights like real ones; the
+# APRS worker's recovery skips them so they never reach the state machine,
+# flight_status or flight_log (the entry expires via its TTL).
+SIMULATED_FIELD = "simulated"
+SIMULATED_VALUE = "1"
+
 
 class RedisWriter:
     """Writes flight state to Redis Hot State."""

@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.tracking.flight_state import FlightStatus
+from app.tracking.flight_state import FlightState, FlightStatus
 from app.tracking.flight_tracker import FlightTracker
+from app.tracking.redis_writer import SIMULATED_FIELD, SIMULATED_VALUE
 from tests.conftest import (
     AF_ELEV,
     approach_and_land,
@@ -110,3 +111,37 @@ async def test_launch_type_event_is_published(tracker):
     data = tracker.redis_writer.flights[("test", GLD)]
     assert data["launch_type"] == "unknown"
     assert data["landing_count"] == "1"
+
+
+async def test_recover_from_redis_skips_simulated_flights(tracker):
+    """A flight written by app.vfsync.simulate (hash field simulated=1)
+    must never enter the state machine on worker restart - it would be
+    periodic-synced to flight_status and archived to flight_log as a real
+    flight. The Redis entry stays (monitor keeps showing it until TTL)."""
+    real = FlightState(flarm_id=GLD, airfield_slug="test", registration="D-REAL",
+                       status=FlightStatus.FLYING, takeoff_time="2026-09-24T10:00:00Z")
+    sim = FlightState(flarm_id="SIM001", airfield_slug="test", registration="D-SIM",
+                      status=FlightStatus.FLYING, takeoff_time="2026-09-24T10:05:00Z")
+    sim_data = sim.to_redis_dict()
+    sim_data[SIMULATED_FIELD] = SIMULATED_VALUE
+    tracker.redis_writer.flights[("test", GLD)] = real.to_redis_dict()
+    tracker.redis_writer.flights[("test", "SIM001")] = sim_data
+
+    restored = await tracker.recover_from_redis()
+
+    assert restored == 1
+    recovered = tracker.state_machine.get_flight("test", GLD)
+    assert recovered is not None and recovered.registration == "D-REAL"
+    assert recovered.airfield_id == tracker._configs["test"].id
+    assert tracker.state_machine.get_flight("test", "SIM001") is None
+    # hot state untouched: the monitor still sees both, TTL cleans up the sim
+    assert set(tracker.redis_writer.flights) == {("test", GLD), ("test", "SIM001")}
+
+
+def test_from_redis_ignores_simulated_marker():
+    data = FlightState(flarm_id="SIM001", airfield_slug="test",
+                       registration="D-SIM").to_redis_dict()
+    data[SIMULATED_FIELD] = SIMULATED_VALUE
+    flight = FlightState.from_redis(data, "test")
+    assert flight.flarm_id == "SIM001" and flight.registration == "D-SIM"
+    assert not hasattr(flight, SIMULATED_FIELD)
