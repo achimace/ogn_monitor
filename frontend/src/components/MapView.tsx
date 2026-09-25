@@ -62,6 +62,52 @@ const TRACK_MAX_AGE_MS = TRACK_HOURS * 60 * 60 * 1000
 /** Fallback track color when the focused flight has no status color. */
 const TRACK_FALLBACK_COLOR = '#38bdf8'
 
+/**
+ * Airspace / airfield overlay (optional raster layer).
+ *
+ * The tiles are rendered server-side by SkyLines (skylines.aero) from
+ * DAeC OpenAir data for Germany (file of 2020-04-28), Austro Control 2015 and
+ * Welt2000 airports. They serve as orientation only and are NOT authoritative
+ * – no current airspace status. SkyLines is a volunteer service without SLA,
+ * so the overlay must degrade gracefully when tiles are unavailable.
+ */
+const AIRSPACE_TILE_URL =
+  'https://skylines.aero/mapproxy/tiles/1.0.0/airspace+airports/EPSG3857/{z}/{x}/{y}.png'
+const AIRSPACE_ATTRIBUTION =
+  'Lufträume/Flugplätze: <a href="https://skylines.aero">SkyLines</a> (DE-Luftraumstand 04/2020)'
+/** Source and layer id of the overlay in the MapLibre style. */
+const AIRSPACE_LAYER_ID = 'skylines-airspace'
+/** Below this zoom the tiles are too cluttered to be useful. */
+const AIRSPACE_MIN_ZOOM = 6
+/** localStorage key for the on/off choice of the overlay. */
+const AIRSPACE_STORAGE_KEY = 'monitor.airspaceOverlay'
+
+/** Read the persisted overlay choice; default on when unreadable. */
+function readAirspacePreference(): boolean {
+  try {
+    const stored = localStorage.getItem(AIRSPACE_STORAGE_KEY)
+    return stored === null ? true : stored === 'true'
+  } catch {
+    return true
+  }
+}
+
+/** Persist the overlay choice; failures (private mode, quota) are ignored. */
+function writeAirspacePreference(on: boolean) {
+  try {
+    localStorage.setItem(AIRSPACE_STORAGE_KEY, on ? 'true' : 'false')
+  } catch {
+    // ignore
+  }
+}
+
+/** Apply the overlay visibility if the map style already has the layer. */
+function applyAirspaceVisibility(map: maplibregl.Map, on: boolean) {
+  if (map.getLayer(AIRSPACE_LAYER_ID)) {
+    map.setLayoutProperty(AIRSPACE_LAYER_ID, 'visibility', on ? 'visible' : 'none')
+  }
+}
+
 type TrackInfo =
   | { state: 'loading' }
   | { state: 'loaded'; count: number; hours: number }
@@ -96,6 +142,13 @@ export default function MapView({
   const lastLivePosRef = useRef<{ lat: number; lon: number } | null>(null)
   const trackAbortRef = useRef<AbortController | null>(null)
   const [trackInfo, setTrackInfo] = useState<TrackInfo | null>(null)
+
+  // --- Airspace overlay ---
+  // Read once on mount; the ref lets the map 'load' handler apply the stored
+  // choice right after addLayer without re-creating the map on toggle.
+  const [airspaceOn, setAirspaceOn] = useState<boolean>(readAirspacePreference)
+  const airspaceOnRef = useRef(airspaceOn)
+  airspaceOnRef.current = airspaceOn
 
   // Initialize map
   useEffect(() => {
@@ -147,6 +200,24 @@ export default function MapView({
     map.on('pitchstart', onUserGesture)
 
     map.on('load', () => {
+      // Airspace / airfield overlay – added first so the radius circle, QDR
+      // lines and track render on top of it. Visibility follows the stored
+      // user choice; 'load' may fire before any toggle, hence the ref.
+      map.addSource(AIRSPACE_LAYER_ID, {
+        type: 'raster',
+        tiles: [AIRSPACE_TILE_URL],
+        tileSize: 256,
+        attribution: AIRSPACE_ATTRIBUTION,
+      })
+      map.addLayer({
+        id: AIRSPACE_LAYER_ID,
+        type: 'raster',
+        source: AIRSPACE_LAYER_ID,
+        minzoom: AIRSPACE_MIN_ZOOM,
+        layout: { visibility: airspaceOnRef.current ? 'visible' : 'none' },
+        paint: { 'raster-opacity': 0.75 },
+      })
+
       // Add airfield marker and radius circle
       if (airfieldLat && airfieldLng) {
         addAirfieldMarker(map, airfieldLat, airfieldLng, airfieldName || '')
@@ -411,11 +482,41 @@ export default function MapView({
     onClearFocus?.()
   }
 
+  function toggleAirspace() {
+    const next = !airspaceOn
+    setAirspaceOn(next)
+    writeAirspacePreference(next)
+    if (mapRef.current) applyAirspaceVisibility(mapRef.current, next)
+  }
+
+  // Keep the layer in sync with the state, also after the style finished
+  // loading (mapReady) or when the map was re-created with new coordinates.
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return
+    applyAirspaceVisibility(mapRef.current, airspaceOn)
+  }, [airspaceOn, mapReady])
+
   const showReset = userInteracted || !!focusFlarmId
 
   return (
     <div className="relative w-full h-full min-h-[400px]">
       <div ref={mapContainer} className="absolute inset-0 rounded-lg overflow-hidden" />
+      <button
+        type="button"
+        onClick={toggleAirspace}
+        aria-pressed={airspaceOn}
+        className={`absolute top-3 right-14 z-10 text-sm font-semibold rounded-lg
+          px-3 py-2 shadow-lg backdrop-blur border transition-colors
+          flex items-center gap-2 ${
+          airspaceOn
+            ? 'bg-tower-qdr text-white border-tower-qdr'
+            : 'bg-tower-surface/95 text-gray-300 border-tower-border hover:text-white'
+        }`}
+        title="Lufträume und Flugplätze (SkyLines, Orientierung – kein aktueller Luftraumstand)"
+      >
+        <span aria-hidden>{airspaceOn ? '◉' : '○'}</span>
+        Lufträume
+      </button>
       {showReset && (
         <div className="absolute top-3 left-3 z-10 flex flex-col items-start gap-1.5">
           <button
