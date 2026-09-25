@@ -96,6 +96,7 @@ async def load_airfield_configs() -> dict:
             home_radius_m=row["home_radius_m"] or settings.home_radius_m,
             takeoff_speed_kmh=row["takeoff_speed_kmh"] or settings.takeoff_speed_threshold_kmh,
             takeoff_alt_offset_m=row["takeoff_alt_offset_m"] or settings.takeoff_altitude_offset_m,
+            takeoff_min_fast_beacons=settings.takeoff_min_fast_beacons,
             alarm_timeout_s=row["alarm_timeout_s"] or settings.alarm_timeout_s,
             signal_loss_timeout_s=row["signal_loss_timeout_s"] or settings.signal_loss_timeout_s,
             ogn_filter_radius_km=row["ogn_filter_radius_km"] or settings.ogn_default_radius_km,

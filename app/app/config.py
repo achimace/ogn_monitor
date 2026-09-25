@@ -1,6 +1,13 @@
 """Application configuration via environment variables."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+# OGN data usage policy (https://www.glidernet.org/ogn-data-usage/):
+# "You do not re-distribute OGN data older than 24 hours". The per-aircraft
+# track stream is served to browsers via the API, so its retention may
+# never exceed this bound.
+OGN_MAX_REDISTRIBUTION_AGE_S = 24 * 3600
 
 
 class Settings(BaseSettings):
@@ -44,9 +51,33 @@ class Settings(BaseSettings):
     alarm_timeout_s: int = 600  # 10 minutes without beacon -> ALARM
     signal_loss_timeout_s: int = 300  # 5 minutes -> start concern
 
+    # Takeoff confirmation: the raw ground speed must be at/above
+    # takeoff_speed_kmh on at least this many consecutive beacons (the
+    # declaring beacon included) before a takeoff / restart / touch & go is
+    # declared. Defeats single GPS glitch beacons. The takeoff time stays
+    # the first fast beacon; only the declaration waits. 1 = declare on the
+    # first fast + high beacon (legacy behaviour).
+    takeoff_min_fast_beacons: int = 2
+
     # Per-aircraft track stream (track:{slug}:{flarm_id}) for the monitor map
     track_min_interval_s: int = 5  # Thinning: min. beacon-time gap between stored points
-    track_retention_s: int = 86400  # 24h sliding TTL of the track stream
+    # 24h sliding TTL of the track stream. Hard upper bound: the OGN data
+    # usage policy (https://www.glidernet.org/ogn-data-usage/) forbids
+    # re-distributing OGN data older than 24 hours, and the API serves this
+    # stream to browsers. See OGN_MAX_REDISTRIBUTION_AGE_S / the validator.
+    track_retention_s: int = 86400
+
+    @field_validator("track_retention_s")
+    @classmethod
+    def _track_retention_within_ogn_policy(cls, value: int) -> int:
+        """Reject retention windows beyond the OGN 24 h redistribution limit."""
+        if value > OGN_MAX_REDISTRIBUTION_AGE_S:
+            raise ValueError(
+                f"track_retention_s={value} exceeds {OGN_MAX_REDISTRIBUTION_AGE_S} s: "
+                "the OGN data usage policy (glidernet.org/ogn-data-usage) forbids "
+                "re-distributing OGN data older than 24 hours"
+            )
+        return value
 
     # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
     vfsync_enabled: bool = False

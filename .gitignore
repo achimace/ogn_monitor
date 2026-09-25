@@ -56,3 +56,4 @@ htmlcov/
 app/app/db/migrations/versions/*.pyc
 .env.uat-local
 .env.uat-local-insecure
+frontend/tsconfig.tsbuildinfo

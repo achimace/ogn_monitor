@@ -16,6 +16,7 @@ from tests.conftest import (
     beacon,
     fly_away,
     ground_roll,
+    make_config,
 )
 
 GLD = "GLD001"
@@ -44,6 +45,97 @@ def test_takeoff_time_is_start_of_ground_roll(sim: Sim):
     # Roll started at t=9 (first beacon >= takeoff speed), lift-off seen at t=15
     assert flight.takeoff_time == _iso_from_ts(T0 + 9)
     assert sm_events(sim) == ["takeoff"]
+
+
+def _glitch(fid: str, t: float):
+    """A single GPS glitch beacon: speed and altitude jump at once."""
+    return beacon(fid, t, east=40, alt=AF_ELEV + 120, speed=150, vs=0.0)
+
+
+def test_single_glitch_beacon_on_ground_does_not_start_a_flight(sim: Sim):
+    sim.feed(beacon(GLD, 0, speed=0))
+    sim.feed(beacon(GLD, 3, speed=0))
+    # One glitch: (0 + 0 + 150) / 3 = 50 km/h >= 40 and 120 m high
+    assert sim.feed(_glitch(GLD, 6)) is None
+    assert sim.flight(GLD) is None
+    # Back to normal: still sitting on the apron, nothing was started
+    assert sim.feed(beacon(GLD, 9, speed=0)) is None
+    assert sim.feed(beacon(GLD, 12, speed=2)) is None
+    assert sim.flight(GLD) is None
+    assert sim.events == []
+
+
+def test_glitch_beacon_starts_a_flight_with_legacy_setting():
+    """Contrast: takeoff_min_fast_beacons=1 is the old behaviour."""
+    sim = Sim(make_config(takeoff_min_fast_beacons=1))
+    sim.feed(beacon(GLD, 0, speed=0))
+    sim.feed(beacon(GLD, 3, speed=0))
+    flight = sim.feed(_glitch(GLD, 6))
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+
+
+def test_takeoff_declared_on_second_fast_beacon_keeps_first_fast_time(sim: Sim):
+    """Only one fast beacon before lift-off: the declaration waits for the
+    next fast beacon, the takeoff time is still the first fast beacon."""
+    sim.feed(beacon(GLD, 0, speed=0))
+    sim.feed(beacon(GLD, 3, speed=5))
+    # First fast beacon is already 60 m high (fast winch launch, sparse beacons)
+    assert sim.feed(beacon(GLD, 6, east=100, alt=AF_ELEV + 60, speed=90, vs=4.0)) is None
+    assert sim.flight(GLD) is None
+    flight = sim.feed(beacon(GLD, 9, east=200, alt=AF_ELEV + 120, speed=95, vs=5.0))
+
+    assert flight is not None and flight.status == FlightStatus.TAKEOFF
+    assert flight.takeoff_time == _iso_from_ts(T0 + 6)
+    assert sm_events(sim) == ["takeoff"]
+
+
+def test_glitch_after_aborted_roll_does_not_start_a_flight(sim: Sim):
+    """A slow beacon resets the confirmation counter."""
+    sim.feed(beacon(GLD, 0, speed=0))
+    sim.feed(beacon(GLD, 3, east=10, speed=45))   # fast, on the ground
+    sim.feed(beacon(GLD, 6, east=15, speed=10))   # roll aborted
+    assert sim.feed(_glitch(GLD, 9)) is None
+    assert sim.flight(GLD) is None
+
+
+def test_single_glitch_beacon_on_landed_aircraft_is_not_a_touch_and_go(sim: Sim):
+    _airborne_flight(sim)
+    sim.feed_all(approach_and_land(GLD, 600))
+    assert sim.flight(GLD).status == FlightStatus.LANDING
+
+    flight = sim.feed(_glitch(GLD, 640))
+    assert flight.status == FlightStatus.LANDING
+    assert flight.landing_count == 1
+    assert flight.landing_time == _iso_from_ts(T0 + 612)
+
+    flight = sim.feed(beacon(GLD, 643, speed=0))
+    assert flight.status == FlightStatus.LANDING
+    assert "touch_and_go" not in sm_events(sim)
+    assert "landing_retracted" not in sm_events(sim)
+
+
+def test_single_glitch_beacon_on_final_landed_aircraft_is_not_a_restart(sim: Sim):
+    _airborne_flight(sim)
+    sim.feed_all(approach_and_land(GLD, 600))
+    flight = sim.feed(beacon(GLD, 720, speed=0))
+    assert flight.landing_final is True
+    first_takeoff = flight.takeoff_time
+
+    flight = sim.feed(_glitch(GLD, 800))
+    assert flight.status == FlightStatus.LANDING
+    assert flight.takeoff_time == first_takeoff
+    assert "flight_restarted" not in sm_events(sim)
+    assert sm_events(sim).count("takeoff") == 1
+    # Parked aircraft keeps beaconing: the glitch's roll reference is dropped
+    flight = sim.feed(beacon(GLD, 803, speed=0))
+    assert flight.status == FlightStatus.LANDING
+
+    # A real restart afterwards still works (two fast beacons)
+    sim.feed(beacon(GLD, 900, east=20, speed=45))
+    flight = sim.feed(beacon(GLD, 903, east=150, alt=AF_ELEV + 60, speed=95, vs=3.0))
+    assert flight.status == FlightStatus.TAKEOFF
+    assert flight.takeoff_time == _iso_from_ts(T0 + 900)
+    assert sm_events(sim)[-2:] == ["flight_restarted", "takeoff"]
 
 
 def test_overflight_without_ground_contact_is_ignored(sim: Sim):

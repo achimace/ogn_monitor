@@ -71,6 +71,14 @@ class AirfieldConfig:
     # Takeoff time = first beacon at/above takeoff speed, as long as the
     # ground roll took no longer than this. Otherwise the lift-off beacon.
     takeoff_roll_max_s: int = 90
+    # Takeoff / restart / touch & go is only declared once the RAW ground
+    # speed has been at/above takeoff_speed_kmh on this many consecutive
+    # beacons (declaring beacon included). A single GPS glitch beacon
+    # (speed + altitude jump) can otherwise pass the rolling-average and
+    # altitude checks on its own. The takeoff time is unaffected (first
+    # fast beacon); only the declaration waits. <= 1 = legacy behaviour.
+    # Default from settings.takeoff_min_fast_beacons (worker).
+    takeoff_min_fast_beacons: int = 2
     landing_speed_kmh: int = 50
     # Two-stage absence escalation:
     #   signal_loss_timeout_s → yellow "SIGNAL_LOST" (harmless, just info)
@@ -184,6 +192,11 @@ class FlightStateMachine:
         self._pending_events = []
         return events
 
+    def requeue_events(self, events: list[dict]) -> None:
+        """Put drained events back (in front), e.g. after filtering."""
+        if events:
+            self._pending_events = events + self._pending_events
+
     def process_beacon(self, beacon: Beacon, config: AirfieldConfig) -> FlightState | None:
         """Process a beacon for a specific airfield.
 
@@ -257,7 +270,8 @@ class FlightStateMachine:
                 if entry is None:
                     entry = {"first_seen": now_mono,
                              "speeds": deque(maxlen=SPEED_WINDOW_SIZE),
-                             "fast_since_ts": 0.0}
+                             "fast_since_ts": 0.0,
+                             "fast_count": 0}
                     gc[beacon.flarm_id] = entry
                     log.debug(
                         "ground_contact",
@@ -268,6 +282,7 @@ class FlightStateMachine:
                     )
                 entry["speeds"].append(beacon.speed)
                 entry["fast_since_ts"] = 0.0
+                entry["fast_count"] = 0
                 return None  # On ground, not airborne yet
 
             # Aircraft is moving/airborne - check for takeoff
@@ -282,15 +297,33 @@ class FlightStateMachine:
             # decide takeoff — robust against single-beacon GPS glitches.
             is_fast = avg_speed >= config.takeoff_speed_kmh
 
+            confirmed = False
             if was_on_ground:
                 # Remember when the ground roll started: first beacon at or
                 # above takeoff speed (raw, so the smoothing lag does not
                 # shift the takeoff time), reset if the roll is aborted.
+                # fast_count = consecutive raw-fast beacons (confirmation).
                 if beacon.speed >= config.takeoff_speed_kmh:
                     if not entry["fast_since_ts"]:
                         entry["fast_since_ts"] = ts
+                    entry["fast_count"] += 1
                 else:
                     entry["fast_since_ts"] = 0.0
+                    entry["fast_count"] = 0
+                confirmed = self._takeoff_confirmed(entry["fast_count"], config)
+
+            if is_high and is_fast and not is_too_high and was_on_ground and not confirmed:
+                # Looks like a lift-off, but only one fast beacon so far: a
+                # single glitch must not start a flight. Wait for the next.
+                log.debug(
+                    "takeoff_unconfirmed",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    fast_beacons=entry["fast_count"],
+                    speed=beacon.speed,
+                    agl=round(agl),
+                )
+                return None
 
             if is_high and is_fast and not is_too_high and was_on_ground:
                 # Aircraft was on ground and is now airborne - takeoff!
@@ -351,8 +384,13 @@ class FlightStateMachine:
             if beacon.speed >= config.takeoff_speed_kmh:
                 if not flight._restart_fast_since_ts:
                     flight._restart_fast_since_ts = ts
+                flight._restart_fast_count += 1
             else:
                 flight._restart_fast_since_ts = 0.0
+                flight._restart_fast_count = 0
+            restart_confirmed = self._takeoff_confirmed(
+                flight._restart_fast_count, config
+            )
 
             clearly_airborne = (agl > config.near_ground_band_m
                                 and beacon.speed >= config.takeoff_speed_kmh)
@@ -364,6 +402,22 @@ class FlightStateMachine:
                 # go-around, not a landing (no phantom).
                 self._retract_landing(slug, flight, "silence_phantom")
                 # fall through: processed as an airborne beacon below
+            elif (at_home and is_high and is_fast and not is_too_high
+                    and not restart_confirmed):
+                # Single fast + high beacon on a landed aircraft: glitch
+                # guard, same as for the initial takeoff. Treated as a
+                # ground beacon (position refresh) below.
+                log.debug(
+                    "restart_unconfirmed",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    fast_beacons=flight._restart_fast_count,
+                    speed=beacon.speed,
+                    agl=round(agl),
+                )
+                flight.last_seen = now_iso
+                flight.elapsed_s = 0
+                return flight
             elif at_home and is_high and is_fast and not is_too_high:
                 if not flight.landing_final:
                     if ground_elapsed < config.bounce_debounce_s:
@@ -715,6 +769,15 @@ class FlightStateMachine:
             return None
         return af_flights.pop(flarm_id, None)
 
+    def discard_ground_contact(self, airfield_slug: str, flarm_id: str) -> None:
+        """Forget a ground-cache entry (aircraft seen stationary at home).
+
+        Used when a device must no longer be tracked at all (DDB opt-out).
+        """
+        gc = self._ground_cache.get(airfield_slug)
+        if gc:
+            gc.pop(flarm_id, None)
+
     def restore_flight(self, airfield_slug: str, flight: FlightState) -> None:
         """Restore a flight from Redis (on worker restart)."""
         if airfield_slug not in self.flights:
@@ -726,6 +789,18 @@ class FlightStateMachine:
     # ------------------------------------------------------------------
     # Landing helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _takeoff_confirmed(fast_count: int, config: AirfieldConfig) -> bool:
+        """Whether enough consecutive raw-fast beacons were seen to declare
+        a takeoff / restart / touch & go (glitch guard).
+
+        ``takeoff_min_fast_beacons <= 1`` restores the legacy behaviour:
+        declare on the first beacon that is high and (smoothed) fast.
+        """
+        if config.takeoff_min_fast_beacons <= 1:
+            return True
+        return fast_count >= config.takeoff_min_fast_beacons
 
     @staticmethod
     def _final_delay_s(flight: FlightState, config: AirfieldConfig) -> int:
@@ -791,6 +866,7 @@ class FlightStateMachine:
         flight.landing_confidence = 0.0
         flight.landing_final = False
         flight._restart_fast_since_ts = 0.0
+        flight._restart_fast_count = 0
         flight.reset_speed_window()
         self._emit_event(
             slug, "landing_retracted", flight.flarm_id, flight,
@@ -818,6 +894,7 @@ class FlightStateMachine:
         flight.landing_confidence = 0.0
         flight.landing_final = False
         flight._restart_fast_since_ts = 0.0
+        flight._restart_fast_count = 0
         flight.reset_speed_window()
         log.info(
             "touch_and_go",

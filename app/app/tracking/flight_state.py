@@ -141,8 +141,10 @@ class FlightState:
     _silence_candidate_ts: float = 0.0
     _silence_candidate_conf: float = 0.0
 
-    # Ground roll start while sticky-landed (restart takeoff time)
+    # Ground roll start while sticky-landed (restart takeoff time) and the
+    # number of consecutive raw-fast beacons (restart / T&G confirmation)
     _restart_fast_since_ts: float = 0.0
+    _restart_fast_count: int = 0
 
     # Consecutive beacons dropped as out-of-order (timeline reset guard)
     _ooo_drops: int = 0
