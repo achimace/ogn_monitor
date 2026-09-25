@@ -97,3 +97,49 @@ def test_plan_tiles_dedups_shared_tiles():
     to_fetch, skipped = plan_tiles(airfields, 5, set(), force=False)
     assert to_fetch == ["Copernicus_DSM_COG_30_N47_00_E011_00_DEM"]
     assert skipped == []
+
+
+class _AnalyzeDb:
+    def __init__(self):
+        self.executed: list[str] = []
+
+    async def execute(self, query, *args):
+        self.executed.append(query)
+
+
+async def test_run_import_analyzes_table_only_after_new_tiles(monkeypatch):
+    from app.tools import import_elevation as mod
+
+    db = _AnalyzeDb()
+    monkeypatch.setattr(mod, "get_db", lambda: db)
+
+    async def airfields(_db, _slug):
+        return [{"slug": "a", "latitude": 47.6, "longitude": 11.2}]
+
+    async def existing(_db):
+        return set()
+
+    async def download(_client, _name):
+        return b"tif"
+
+    async def store(_db, _name, _data, replace):
+        return 361
+
+    monkeypatch.setattr(mod, "load_airfields", airfields)
+    monkeypatch.setattr(mod, "existing_tiles", existing)
+    monkeypatch.setattr(mod, "download_tile", download)
+    monkeypatch.setattr(mod, "store_tile", store)
+
+    summary = await mod.run_import(None, 5.0, force=False)
+    assert summary.imported == ["Copernicus_DSM_COG_30_N47_00_E011_00_DEM"]
+    assert db.executed == ["ANALYZE elevation_tiles"]
+
+    # Everything already present: no ANALYZE
+    async def existing_all(_db):
+        return {"Copernicus_DSM_COG_30_N47_00_E011_00_DEM"}
+
+    monkeypatch.setattr(mod, "existing_tiles", existing_all)
+    db.executed.clear()
+    summary = await mod.run_import(None, 5.0, force=False)
+    assert summary.skipped_existing == ["Copernicus_DSM_COG_30_N47_00_E011_00_DEM"]
+    assert db.executed == []

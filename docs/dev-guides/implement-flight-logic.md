@@ -92,10 +92,22 @@ zwei AGL-Werte (Details im Modul-Docstring):
 | **Gelaende** (`agl`) | `FlightState.altitude_agl` (Anzeige, Track-Stream, flight_log), Aussenlande-Erkennung (`outlanding_max_agl_m` / `outlanding_recover_agl_m`), "eindeutig airborne" beim Zuruecknehmen einer Phantom-Funkstille-Landung, `analyze_profile(ground_elevation_m=...)` via `FlightTracker.classify_flight_end` |
 
 Regeln:
-- Lookup **vor** dem CPU-gebundenen State-Machine-Aufruf (async, Cache
-  ~100-m-Zellen, DB nur bei Miss, Negativ-Cache fuer Regionen ohne Kacheln).
-  Nur fuer bereits verfolgte Fluege - nie fuer jeden der tausenden Beacons
-  im APRS-Filterradius.
+- Lookup **vor** dem CPU-gebundenen State-Machine-Aufruf (async, Subtile-
+  Cache im Speicher, DB nur bei Miss, Negativ-Cache fuer Regionen ohne
+  Kacheln). Nur fuer bereits verfolgte Fluege - nie fuer jeden der
+  tausenden Beacons im APRS-Filterradius.
+- Subtile-Cache: `elevation_tiles.rast` sind 64x64-px-Subtiles (~0,053 Grad,
+  ~6 km x 4 km bei 47N). Ein Miss laedt mit **einer** Query alle Subtiles,
+  die die 0,05-Grad-Rasterzelle der Position schneiden (max. 2x2), inklusive
+  aller Pixelwerte (`ST_DumpValues`), und merkt die Zelle als "bekannt"
+  (ohne Subtile = Negativ-Eintrag). Jede weitere Position im Subtile ist
+  ein reiner Speicherzugriff (`values[row*w+col]`), d. h. eine DB-Query pro
+  ~24 km^2 statt pro 100-m-Zelle. Speicher: ein Subtile = 4096 float32 =
+  16 KB (`array('f')`); `terrain_cache_max_tiles` (4000 ~ 65 MB) begrenzt
+  den Cache, bei Ueberlauf faellt die aeltere Haelfte weg. Warm-up pro
+  Flugplatz = eine Query ueber `ST_Buffer(geography, radius)` (10 km ~
+  20-40 Subtiles, wenige 100 ms). Einziger DB-Fixkostenblock: der erste
+  Raster-Aufruf pro Backend-Verbindung (~100 ms, Extension-Init).
 - Kein Wert (keine Kachel, DB-Fehler, `TERRAIN_AGL_ENABLED=false`) =>
   `terrain_m=None` => Platzhoehe wie frueher. Kill switch in `config.py`.
 - Copernicus ist ein DSM: ueber Wald ~20-30 m zu hoch. Deshalb bleiben die

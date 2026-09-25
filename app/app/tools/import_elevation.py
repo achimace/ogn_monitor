@@ -219,7 +219,20 @@ async def run_import(slug: str | None, radius_km: float, force: bool) -> ImportS
                 subtiles=rows, replaced=replace,
                 duration_s=round(time.monotonic() - t0, 1),
             )
+    if summary.imported or summary.replaced:
+        await analyze_tiles(db)
     return summary
+
+
+async def analyze_tiles(db) -> None:
+    """Refresh planner statistics after a bulk load.
+
+    Without them the planner may prefer a sequential scan over the GiST
+    index for the worker's tile lookups (``ANALYZE`` is cheap here).
+    """
+    t0 = time.monotonic()
+    await db.execute("ANALYZE elevation_tiles")
+    log.info("tiles_analyzed", duration_s=round(time.monotonic() - t0, 1))
 
 
 async def run_check(lat: float, lon: float) -> float | None:
