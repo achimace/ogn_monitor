@@ -506,6 +506,8 @@ class LaunchDetector:
             return None
         if other.status not in (FlightStatus.TAKEOFF, FlightStatus.FLYING, FlightStatus.TOWING):
             return None
+        if other.is_visitor:
+            return None  # did not start here: cannot be this glider's tow plane
         role = self._role_of(other, config)
         if role in (ROLE_GLIDER, ROLE_MOTORGLIDER):
             return None  # gliders do not tow

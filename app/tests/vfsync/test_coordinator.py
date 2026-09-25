@@ -181,18 +181,48 @@ async def test_landing_of_second_flight_does_not_touch_older_open_session(coord,
     assert len(await stores["sessions"].list_open(airfield_id=AF)) == 2
 
 
-async def test_event_without_takeoff_time_falls_back_to_open_session(coord, stores):
+async def test_events_without_takeoff_time_are_ignored(coord, stores):
+    """Never attach an event without takeoff_time to another open session."""
     t = tenant()
     first = await coord.on_event(t, event("takeoff", make_flight()))
-    f = make_flight(takeoff_time="", landing_time=LANDING, landing_final=True,
-                    landing_method="observed", landing_confidence=0.9)
-    s = await coord.on_event(t, event("landing_final", f))
-    assert s.session_id == first.session_id
-    assert s.landing_ts == parse_iso(LANDING)
+    for etype, extra in (
+        ("landing_final", dict(landing_time=LANDING, landing_final=True,
+                               landing_method="observed", landing_confidence=0.9)),
+        ("landing", dict(landing_time=LANDING)),
+        ("touch_and_go", dict(landing_count=2, touch_go_confidence=0.8)),
+        ("launch_type_detected", dict(launch_type="winch")),
+        ("landing_retracted", dict()),
+    ):
+        f = make_flight(takeoff_time="", **extra)
+        assert await coord.on_event(t, event(etype, f)) is None, etype
+    kept = await stores["sessions"].get(first.session_id)
+    assert kept.landing_ts is None and kept.landing_count == 1
+    assert kept.start_type_detected is None and kept.state == SessionState.TRACKING
+    assert len(await stores["sessions"].list_open()) == 1
 
-    # no open session at all and no takeoff time -> ignored
+    # no open session at all and no takeoff time -> ignored as well
     f = make_flight(flarm_id="000000", takeoff_time="", landing_time=LANDING, landing_final=True)
     assert await coord.on_event(t, event("landing_final", f)) is None
+    assert len(await stores["sessions"].list_open()) == 1
+
+
+async def test_visitor_events_are_ignored(coord, stores):
+    t = tenant()
+    for etype, extra in (
+        ("takeoff", dict(status=FlightStatus.TAKEOFF)),
+        ("launch_type_detected", dict(launch_type="aerotow")),
+        ("touch_and_go", dict(landing_count=2)),
+        ("landing_final", dict(landing_time=LANDING, landing_final=True,
+                               status=FlightStatus.LANDING)),
+        ("landing_retracted", dict()),
+    ):
+        f = make_flight(is_visitor=True, takeoff_airfield="Unterwoessen Airfield (EDPU)",
+                        **extra)
+        assert await coord.on_event(t, event(etype, f)) is None, etype
+    assert await stores["sessions"].list_open() == []
+    # The same aircraft as a home flight is booked normally
+    s = await coord.on_event(t, event("takeoff", make_flight()))
+    assert s is not None and s.state == SessionState.TRACKING
 
 
 async def test_landing_retracted_after_completion_goes_to_review(coord, stores):
@@ -216,10 +246,11 @@ async def test_ignored_and_malformed_events(coord, stores):
     assert await stores["sessions"].list_open() == []
 
 
-async def test_takeoff_without_time_uses_clock(coord):
+async def test_takeoff_without_time_is_ignored(coord, stores):
+    """No clock fallback: a takeoff without takeoff_time creates no session."""
     f = make_flight(takeoff_time="")
-    s = await coord.on_event(tenant(), event("takeoff", f))
-    assert s.takeoff_ts == NOW
+    assert await coord.on_event(tenant(), event("takeoff", f)) is None
+    assert await stores["sessions"].list_open() == []
 
 
 async def test_process_hook_is_noop_without_writer(coord):

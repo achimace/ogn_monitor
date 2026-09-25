@@ -76,7 +76,8 @@ async def get_flight_log(
                    fl.flight_duration_s, fl.max_altitude_m, fl.max_distance_m,
                    fl.launch_type, fl.landing_type,
                    fl.tow_plane_registration, fl.release_altitude_m,
-                   fl.signal_loss_scenario
+                   fl.signal_loss_scenario,
+                   fl.takeoff_airfield, fl.landing_airfield, fl.is_visitor
             FROM flight_log fl
             WHERE {where}
             ORDER BY fl.takeoff_time DESC
@@ -93,6 +94,12 @@ async def get_flight_log(
         item['end_status'] = r['landing_type'] or r['signal_loss_scenario'] or 'unknown'
         item['tow_plane_reg'] = r['tow_plane_registration']
         item['release_alt_m'] = r['release_altitude_m']
+        # Foreign airfields / visitors (additive, camelCase per the
+        # monitor contract; the snake_case originals stay in the item)
+        item['takeoffAirfield'] = r['takeoff_airfield'] or ''
+        item['landingAirfield'] = r['landing_airfield'] or ''
+        item['landingType'] = r['landing_type'] or ''
+        item['isVisitor'] = bool(r['is_visitor'])
         items.append(item)
 
     return {
@@ -142,7 +149,8 @@ async def export_csv(
         f"""SELECT fl.registration, fl.competition_sign, fl.aircraft_model,
                    fl.takeoff_time, fl.landing_time, fl.flight_duration_s,
                    fl.max_altitude_m, fl.max_distance_m, fl.launch_type,
-                   fl.landing_type, fl.tow_plane_registration, fl.release_altitude_m
+                   fl.landing_type, fl.tow_plane_registration, fl.release_altitude_m,
+                   fl.takeoff_airfield, fl.landing_airfield
             FROM flight_log fl
             WHERE {where}
             ORDER BY fl.takeoff_time ASC""",
@@ -156,6 +164,7 @@ async def export_csv(
         'Datum', 'Kennzeichen', 'WB-Kz', 'Typ', 'Start (UTC)', 'Landung (UTC)',
         'Dauer (h:mm)', 'Max Hoehe (m)', 'Max Distanz (km)', 'Startart',
         'Status', 'Schleppflugzeug', 'Ausklink-Hoehe (m)',
+        'Startort', 'Landeort',
     ])
 
     for r in rows:
@@ -186,6 +195,8 @@ async def export_csv(
             r['landing_type'] or '',
             r['tow_plane_registration'] or '',
             r['release_altitude_m'] or '',
+            r['takeoff_airfield'] or '',
+            r['landing_airfield'] or '',
         ])
 
     filename = f"fluglog-{date_filter or date.today().isoformat()}.csv"

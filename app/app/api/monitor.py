@@ -174,7 +174,8 @@ async def get_today(slug: str):
         """
         SELECT flarm_id, registration, competition_sign, aircraft_model,
                takeoff_time, landing_time, flight_duration_s,
-               max_altitude_m, max_distance_m, launch_type, landing_type
+               max_altitude_m, max_distance_m, launch_type, landing_type,
+               takeoff_airfield, landing_airfield, is_visitor
         FROM flight_log
         WHERE airfield_id = $1
           AND landing_time IS NOT NULL
@@ -203,6 +204,10 @@ async def get_today(slug: str):
             "maxDistanceM": str(r["max_distance_m"] or 0),
             "launchType": r["launch_type"] or "unknown",
             "landingType": r["landing_type"] or "home",
+            # Same string encoding as the Redis hash (see FlightState.to_redis_dict)
+            "takeoffAirfield": r["takeoff_airfield"] or "",
+            "landingAirfield": r["landing_airfield"] or "",
+            "isVisitor": "1" if r["is_visitor"] else "0",
             "source": "archived",
         }
 

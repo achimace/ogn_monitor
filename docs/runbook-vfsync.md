@@ -113,6 +113,16 @@ Der Mock ist **nicht** für den Server gedacht: Profil `vfmock` und
   Sessions nichts mehr.
 - **Manuelle Eingaben in VF gewinnen immer** – der Worker füllt nur leere
   Felder und erhöht `landingcount` nie nach unten.
+- **Ignorierte Events:** Der Worker verarbeitet nur Events mit
+  `takeoff_time`. Ein `takeoff` ohne Startzeit (Log
+  `vfsync_takeoff_without_time`) oder ein `landing_final` /
+  `touch_and_go` / `launch_type_detected` / `landing_retracted` ohne
+  Startzeit (Log `vfsync_event_without_takeoff_time`) wird verworfen – es
+  wird weder eine Session mit der aktuellen Uhrzeit angelegt noch an eine
+  andere offene Session desselben Flugzeugs angehängt. Besucher (Flugzeuge,
+  die nicht am Platz gestartet sind, `is_visitor = "1"`) werden nie in das
+  Vereinsflieger dieses Vereins gebucht (Log `vfsync_visitor_ignored`); sie
+  erscheinen nur im Tower-Monitor.
 
 ## 4. Alarme (R-12)
 

@@ -701,6 +701,28 @@ Server -> Client (Start erkannt):
   "flight": { ... komplettes Flight-Objekt ... }
 }
 
+// Besucher (Worker-Event "visitor_arrived": ein Flugzeug, das nicht hier
+// gestartet ist, fliegt in der Besucherzone; isVisitor = true,
+// takeoffAirfield = Abflugplatz oder "unbekannt", takeoffTime ggf. leer).
+// Gleiches Format wie flight_added, zusaetzlich eventType + message:
+{
+  "type": "flight_added",
+  "eventType": "visitor_arrived",
+  "message": "Besucher aus Unterwoessen Airfield (EDPU)",
+  "flight": { ..., "isVisitor": true, "takeoffAirfield": "Unterwoessen Airfield (EDPU)", ... }
+}
+// Verlaesst der Besucher die Zone wieder, verstummt er vor der Landung, geht er
+// abseits eines Platzes runter oder landet er an einem anderen Platz:
+// flight_removed mit reason "visitor_left" (kein Alarm, kein Flugbuch-Eintrag).
+// Besucher erreichen nie OUTLANDING_PENDING / OUTLANDING / SIGNAL_LOST / ALARM.
+// Mandanten-Grenze: ein Flugzeug, das Platz A bereits verfolgt, wird Platz B
+// nie als Besucher angeboten (FlightTracker.process_line).
+// Ein nach Aussenlandung am Boden zu Hause wieder auftauchendes Flugzeug:
+// flight_removed mit reason "outlanding_returned" (Aussenlande-Flug ins
+// Flugbuch, Flugzeug wird vergessen; kein Flug ohne Startzeit).
+// VF-Sync ignoriert Worker-Events ohne takeoffTime und alle Events von
+// Besuchern (isVisitor) - siehe docs/runbook-vfsync.md Kap. 3.
+
 Server -> Client (Landung, Flug archiviert):
 {
   "type": "flight_removed",
@@ -878,6 +900,12 @@ HSET flight:ohlstadt:000239
     launch_type    "aerotow"
     tow_plane_reg  "D-ENNU"
     release_alt_m  "1150"
+    # Fremde Flugplaetze / Besucher (Migration 011, docs/dev-guides/implement-flight-logic.md)
+    takeoff_airfield "Ohlstadt"          # Heimatplatz-Name / bekannter Platz "Name (ICAO)" / "Feld" / "unbekannt"
+    landing_airfield ""                  # mit der Landung: Heimatname / "Unterwoessen Airfield (EDPU)" / "" (Aussenlandung)
+    landing_type   ""                    # "" solange in der Luft, dann home / foreign / outlanding / diverted
+    is_visitor     "0"                   # "1": nicht hier gestartet, in der Besucherzone aufgenommen
+    visitor_since  ""                    # ISO, erster Beacon in der Besucherzone (nur Besucher)
 
 # Expire nach 24h (Sicherheits-Cleanup)
 EXPIRE flight:ohlstadt:000239 86400
@@ -1023,6 +1051,9 @@ Flugzeug steht am Platz (nicht getrackt, nur im APRS-Stream sichtbar)
     +--------> Flugzeug ist weit weg, niedrig, langsam
     |          [OUTLANDING_PENDING] -> 5 Min. warten
     |              |-> Bewegt sich wieder: zurueck zu [FLYING]
+    |              |-> Rollt dabei ins Heimat-Polygon / an einen bekannten
+    |              |   Platz: normale Landung (LANDABLE_STATUSES enthaelt
+    |              |   OUTLANDING_PENDING)
     |              |-> Bleibt stehen: [OUTLANDING]
     |                   -> Naechster Flugplatz wird ermittelt
     |                   -> "Gelandet bei EDMA (Augsburg), 85 km NW"

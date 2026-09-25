@@ -118,7 +118,27 @@ class FlightState:
     # Outlanding tracking
     outlanding_pending_since: float = 0.0  # monotonic timestamp
 
+    # Foreign airfields / visitors (docs/dev-guides/implement-flight-logic.md)
+    takeoff_airfield: str = ""        # home airfield name / foreign airport / "Feld" / "unbekannt"
+    landing_airfield: str = ""        # set with the landing: home name, airport name, "" (outlanding)
+    landing_type: str = ""            # home / foreign / outlanding / diverted ("" while airborne)
+    is_visitor: bool = False          # did not start at home, picked up in the visitor zone
+    visitor_since: str = ""           # ISO, first beacon inside the visitor zone (visitors only)
+
     # ----- Runtime-only fields (not persisted to Redis) -----
+
+    # Reference point of the current LANDING (home airfield or the foreign
+    # airport): restart / touch & go decisions are made relative to it.
+    _landing_ref_lat: float = 0.0
+    _landing_ref_lon: float = 0.0
+    _landing_ref_elev: float = 0.0
+
+    # Beacon timestamp when the outlanding suspicion started (= landing
+    # time of a confirmed outlanding) and the consecutive "clearly airborne
+    # again" beacons after a confirmed outlanding (P1 recovery).
+    _outlanding_pending_ts: float = 0.0
+    _outlanding_airborne_count: int = 0
+    _outlanding_airborne_since_ts: float = 0.0
 
     # Speed hysteresis: beacon timestamp when the smoothed speed first
     # dropped below the landing threshold while near the ground.
@@ -205,6 +225,11 @@ class FlightState:
             "landing_confidence": str(round(self.landing_confidence, 2)),
             "touch_go_confidence": str(round(self.touch_go_confidence, 2)),
             "landing_final": "1" if self.landing_final else "0",
+            "takeoff_airfield": self.takeoff_airfield,
+            "landing_airfield": self.landing_airfield,
+            "landing_type": self.landing_type,
+            "is_visitor": "1" if self.is_visitor else "0",
+            "visitor_since": self.visitor_since,
         }
 
     @classmethod
@@ -250,4 +275,9 @@ class FlightState:
             landing_confidence=float(data.get("landing_confidence", "0")),
             touch_go_confidence=float(data.get("touch_go_confidence", "0")),
             landing_final=data.get("landing_final", "0") == "1",
+            takeoff_airfield=data.get("takeoff_airfield", ""),
+            landing_airfield=data.get("landing_airfield", ""),
+            landing_type=data.get("landing_type", ""),
+            is_visitor=data.get("is_visitor", "0") == "1",
+            visitor_since=data.get("visitor_since", ""),
         )

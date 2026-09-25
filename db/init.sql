@@ -108,6 +108,33 @@ CREATE INDEX IF NOT EXISTS idx_elevation_tiles_source
     ON elevation_tiles (source_tile);
 
 -- =============================================
+-- AIRPORTS (bekannte Flugplaetze, OurAirports, Migration 011)
+-- =============================================
+-- Filled by the operator with  python -m app.tools.import_airports
+-- (DEPLOYMENT.md 9b). The worker keeps the airports around the active
+-- airfields in memory (app/tracking/airports.py): a landing within
+-- foreign_airfield_radius_m of one is a landing there (landing_type
+-- 'foreign'), not an outlanding; takeoffs there give visitors their
+-- takeoff airfield / time. Kept in sync with db/migrations/011_airports.sql
+CREATE TABLE IF NOT EXISTS airports (
+    id            SERIAL PRIMARY KEY,
+    ident         VARCHAR(16) UNIQUE NOT NULL,   -- OurAirports ident (ICAO or e.g. DE-0123)
+    icao_code     VARCHAR(8),
+    name          VARCHAR(120) NOT NULL,
+    type          VARCHAR(24) NOT NULL,          -- small_airport / medium_airport / large_airport
+    latitude      DOUBLE PRECISION NOT NULL,
+    longitude     DOUBLE PRECISION NOT NULL,
+    elevation_m   REAL,
+    iso_country   CHAR(2),
+    municipality  VARCHAR(120),
+    location      GEOGRAPHY(POINT, 4326) NOT NULL,
+    updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_airports_location ON airports USING gist (location);
+CREATE INDEX IF NOT EXISTS idx_airports_country ON airports (iso_country);
+
+-- =============================================
 -- TENANT AIRCRAFT (Vereinsflugzeuge)
 -- =============================================
 CREATE TABLE tenant_aircraft (
@@ -203,6 +230,12 @@ CREATE TABLE flight_status (
     landing_confidence      REAL,
     landing_final           BOOLEAN NOT NULL DEFAULT FALSE,  -- past the T&G window
 
+    -- Foreign airfields / visitors (Migration 011)
+    takeoff_airfield        VARCHAR(100), -- home name / known airport / 'Feld' / 'unbekannt'
+    landing_airfield        VARCHAR(100), -- home name / known airport, '' for outlandings
+    landing_type            VARCHAR(16),  -- 'home', 'foreign', 'outlanding', 'diverted'
+    is_visitor              BOOLEAN NOT NULL DEFAULT FALSE,  -- did not start here
+
     -- Signal loss analysis
     signal_loss_scenario    VARCHAR(16),  -- DIVERTED/OUTLANDED/EMERGENCY/SIGNAL_LOST
     signal_loss_severity    VARCHAR(8),   -- CRITICAL/HIGH/MEDIUM/LOW
@@ -251,11 +284,13 @@ CREATE TABLE flight_log (
     landing_method          VARCHAR(16),
     landing_confidence      REAL,
 
-    -- Landing info
-    landing_type            VARCHAR(16),  -- 'home', 'outlanding', 'diverted'
-    landing_airfield        VARCHAR(100),
+    -- Landing info (Migration 011: 'foreign' = landing at a known airport)
+    landing_type            VARCHAR(16),  -- 'home', 'foreign', 'outlanding', 'diverted'
+    landing_airfield        VARCHAR(100), -- home name / known airport, NULL for outlandings
     landing_latitude        DOUBLE PRECISION,
     landing_longitude       DOUBLE PRECISION,
+    takeoff_airfield        VARCHAR(100), -- home name / known airport / 'Feld' / 'unbekannt'
+    is_visitor              BOOLEAN NOT NULL DEFAULT FALSE,  -- did not start here
 
     -- Signal loss (if applicable)
     signal_loss_scenario    VARCHAR(16),

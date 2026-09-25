@@ -156,6 +156,12 @@ class SyncCoordinator:
         if not flarm_id:
             log.warning("vfsync_event_without_flarm_id", slug=tenant.slug, type=etype)
             return None
+        if _text(data.get("is_visitor")) == "1":
+            # Visitors (aircraft that did not start here) are shown in the
+            # tower monitor only - they are never booked into this club's
+            # Vereinsflieger.
+            log.debug("vfsync_visitor_ignored", slug=tenant.slug, flarm_id=flarm_id, type=etype)
+            return None
 
         session = await self._session_for(tenant, flarm_id, data, etype)
         if session is None:
@@ -183,32 +189,32 @@ class SyncCoordinator:
                            data: dict[str, Any], etype: str) -> Session | None:
         """Find or create the session an event belongs to.
 
-        With a takeoff_time in the payload the session is upserted on its
-        natural key (creates it after a missed takeoff and never attaches a
-        landing to an older open session of the same aircraft). Without one,
-        the newest open session of the aircraft is used.
+        The session is upserted on its natural key (airfield, flarm_id,
+        takeoff_time): this creates it after a missed takeoff and never
+        attaches a landing to an older open session of the same aircraft.
+        An event without a takeoff time is ignored - there is no session
+        it can safely belong to (no clock fallback, no "newest open
+        session" guess; both would book the wrong flight).
         """
         takeoff_ts = parse_iso(data.get("takeoff_time"))
-        if takeoff_ts is None and etype == "takeoff":
-            takeoff_ts = self.clock()
-            log.warning("vfsync_takeoff_without_time", slug=tenant.slug, flarm_id=flarm_id)
-        if takeoff_ts is not None:
-            session = await self.sessions.upsert(Session(
-                airfield_id=tenant.airfield_id,
-                flarm_id=flarm_id,
-                registration=_text(data.get("registration")),
-                takeoff_ts=takeoff_ts,
-                state=SessionState.TRACKING,
-                created_at=self.clock(),
-                updated_at=self.clock(),
-            ))
-            if session.registration is None:
-                session.registration = _text(data.get("registration"))
-            return session
-        session = await self.sessions.find_open_for_aircraft(tenant.airfield_id, flarm_id)
-        if session is None:
-            log.warning("vfsync_event_without_session", slug=tenant.slug,
-                        flarm_id=flarm_id, type=etype)
+        if takeoff_ts is None:
+            if etype == "takeoff":
+                log.warning("vfsync_takeoff_without_time", slug=tenant.slug, flarm_id=flarm_id)
+            else:
+                log.warning("vfsync_event_without_takeoff_time", slug=tenant.slug,
+                            flarm_id=flarm_id, type=etype)
+            return None
+        session = await self.sessions.upsert(Session(
+            airfield_id=tenant.airfield_id,
+            flarm_id=flarm_id,
+            registration=_text(data.get("registration")),
+            takeoff_ts=takeoff_ts,
+            state=SessionState.TRACKING,
+            created_at=self.clock(),
+            updated_at=self.clock(),
+        ))
+        if session.registration is None:
+            session.registration = _text(data.get("registration"))
         return session
 
     @staticmethod

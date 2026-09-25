@@ -97,12 +97,14 @@ class StateSynchronizer:
                             release_time, release_method, tow_duration_s,
                             pairing_confidence, landing_count, landing_method,
                             landing_confidence, landing_final,
+                            takeoff_airfield, landing_airfield, landing_type,
+                            is_visitor,
                             updated_at
                         ) VALUES (
                             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                             $11, $12, $13, $14, $15, $16, $17, $18, $19,
                             $20, $21, $22, $23, $24, $25, $26, $27, $28,
-                            $29, $30, $31, $32, NOW()
+                            $29, $30, $31, $32, $33, $34, $35, $36, NOW()
                         )
                         ON CONFLICT (airfield_id, flarm_id) DO UPDATE SET
                             registration = EXCLUDED.registration,
@@ -135,6 +137,10 @@ class StateSynchronizer:
                             landing_method = EXCLUDED.landing_method,
                             landing_confidence = EXCLUDED.landing_confidence,
                             landing_final = EXCLUDED.landing_final,
+                            takeoff_airfield = EXCLUDED.takeoff_airfield,
+                            landing_airfield = EXCLUDED.landing_airfield,
+                            landing_type = EXCLUDED.landing_type,
+                            is_visitor = EXCLUDED.is_visitor,
                             updated_at = NOW()
                         """,
                         flight.airfield_id,
@@ -169,6 +175,10 @@ class StateSynchronizer:
                         flight.landing_method or None,
                         flight.landing_confidence or None,
                         flight.landing_final,
+                        flight.takeoff_airfield or None,
+                        flight.landing_airfield or None,
+                        flight.landing_type or None,
+                        flight.is_visitor,
                     )
                 except Exception:
                     log.exception(
@@ -242,12 +252,42 @@ class StateSynchronizer:
 
     async def _write_flight_log(self, db, flight: FlightState,
                                 status: FlightStatus) -> None:
-        """Archive a completed flight to the flight_log table."""
-        landing_type = "home"
-        if status == FlightStatus.OUTLANDING:
-            landing_type = "outlanding"
-        elif status == FlightStatus.DIVERTED:
-            landing_type = "diverted"
+        """Archive a completed flight to the flight_log table.
+
+        ``landing_type`` comes from the flight (home / foreign /
+        outlanding, set by the state machine with the landing); the old
+        status-based mapping is the fallback for flights that predate
+        the field. ``takeoff_time`` is NOT NULL in the table: only a
+        *visitor* may have none (departure never seen) - it is logged from
+        its first beacon in the visitor zone (``visitor_since``), as a
+        last resort its landing. Every other flight starts with a takeoff
+        time (the state machine never invents one); a non-visitor without
+        it is a bug and is not written (a row with takeoff == landing
+        would poison the flight log and VF-Sync).
+        """
+        landing_type = flight.landing_type
+        if not landing_type:
+            landing_type = "home"
+            if status == FlightStatus.OUTLANDING:
+                landing_type = "outlanding"
+            elif status == FlightStatus.DIVERTED:
+                landing_type = "diverted"
+        takeoff_time = _parse_iso_or_none(flight.takeoff_time)
+        if takeoff_time is None and flight.is_visitor:
+            takeoff_time = (
+                _parse_iso_or_none(flight.visitor_since)
+                or _parse_iso_or_none(flight.landing_time)
+            )
+        if takeoff_time is None:
+            log.error(
+                "flight_archive_skipped_no_takeoff_time",
+                flarm_id=flight.flarm_id,
+                airfield_id=flight.airfield_id,
+                landing_time=flight.landing_time,
+                landing_type=landing_type,
+                is_visitor=flight.is_visitor,
+            )
+            return
 
         try:
             await db.execute(
@@ -262,10 +302,11 @@ class StateSynchronizer:
                     tow_plane_registration, release_altitude_agl,
                     release_time, release_method, tow_duration_s,
                     pairing_confidence, landing_count, landing_method,
-                    landing_confidence
+                    landing_confidence,
+                    takeoff_airfield, landing_airfield, is_visitor
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                    $16, $17, $18, $19, $20, $21, $22, $23, $24
+                    $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
                 )
                 ON CONFLICT (airfield_id, flarm_id, takeoff_time) DO UPDATE SET
                     landing_time = COALESCE(EXCLUDED.landing_time, flight_log.landing_time),
@@ -273,6 +314,9 @@ class StateSynchronizer:
                     max_distance_m = GREATEST(EXCLUDED.max_distance_m, flight_log.max_distance_m),
                     launch_type = COALESCE(NULLIF(EXCLUDED.launch_type, 'unknown'), flight_log.launch_type),
                     landing_type = EXCLUDED.landing_type,
+                    takeoff_airfield = COALESCE(EXCLUDED.takeoff_airfield, flight_log.takeoff_airfield),
+                    landing_airfield = COALESCE(EXCLUDED.landing_airfield, flight_log.landing_airfield),
+                    is_visitor = EXCLUDED.is_visitor,
                     tow_plane_flarm_id = COALESCE(EXCLUDED.tow_plane_flarm_id, flight_log.tow_plane_flarm_id),
                     tow_plane_registration = COALESCE(EXCLUDED.tow_plane_registration, flight_log.tow_plane_registration),
                     release_altitude_m = COALESCE(EXCLUDED.release_altitude_m, flight_log.release_altitude_m),
@@ -290,7 +334,7 @@ class StateSynchronizer:
                 flight.registration,
                 flight.aircraft_model,
                 flight.competition_sign,
-                _parse_iso_or_none(flight.takeoff_time),
+                takeoff_time,
                 _parse_iso_or_none(flight.landing_time),
                 flight.max_altitude_m,
                 flight.max_distance_m,
@@ -309,11 +353,17 @@ class StateSynchronizer:
                 flight.landing_count,
                 flight.landing_method or None,
                 flight.landing_confidence or None,
+                flight.takeoff_airfield or None,
+                flight.landing_airfield or None,
+                flight.is_visitor,
             )
             log.info(
                 "flight_archived",
                 flarm_id=flight.flarm_id,
                 landing_type=landing_type,
+                landing_airfield=flight.landing_airfield,
+                takeoff_airfield=flight.takeoff_airfield,
+                is_visitor=flight.is_visitor,
             )
         except Exception:
             log.exception("flight_archive_failed", flarm_id=flight.flarm_id)

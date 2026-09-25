@@ -6,7 +6,16 @@ Handles:
 - Touch & Go: re-takeoff shortly after landing continues the SAME flight
   (landing_count++), a final landing is confirmed by ``landing_final``
 - Silence landing: final approach at home followed by radio silence
-- Outlanding detection (slow + low away from home)
+- Landing at a known foreign airport (AirportIndex, landing_type 'foreign')
+- Outlanding detection (slow + low away from home, no airport nearby) and
+  the return after a confirmed outlanding (airborne again: new flight,
+  like a restart; back on the ground at home: flight archived, aircraft
+  forgotten - never a flight without a takeoff time)
+- Visitors: aircraft that did not start here, picked up airborne inside
+  the visitor zone (takeoff airfield / time from ground contact at a
+  foreign airport when seen), see "Fremde Flugplaetze / Besucher" in
+  docs/dev-guides/implement-flight-logic.md. Visitors never enter the
+  outlanding / signal-lost / alarm paths: they are dropped instead.
 - Alarm on signal loss (timeout)
 - Status transitions with event publishing
 
@@ -47,6 +56,7 @@ from typing import Any
 import structlog
 
 from app.aprs.beacon_parser import Beacon
+from app.tracking.airports import Airport, AirportIndex
 from app.tracking.flight_state import (
     AIRBORNE_STATUSES,
     SPEED_WINDOW_SIZE,
@@ -56,6 +66,31 @@ from app.tracking.flight_state import (
 from app.tracking.geo_calc import azimuth, degrees_to_compass, haversine, altitude_agl
 
 log = structlog.get_logger()
+
+# Statuses from which a landing (home or foreign airport) can be detected:
+# airborne, plus an outlanding suspicion that turns out to be a landing at
+# a known airport / at home after all.
+LANDABLE_STATUSES = AIRBORNE_STATUSES | {FlightStatus.OUTLANDING_PENDING}
+
+# Confirmed outlandings (the aircraft may fly on: motor glider after a
+# pause, retrieve by air, ...). See "Return after a confirmed outlanding".
+OUTLANDED_STATUSES = frozenset({FlightStatus.OUTLANDING, FlightStatus.DIVERTED})
+
+# A confirmed outlanding is over when the aircraft is clearly airborne
+# again on this many consecutive beacons (glitch guard).
+OUTLANDING_RECOVER_MIN_BEACONS = 2
+
+# Takeoffs seen at foreign airports are remembered for this long so a
+# later arrival at home gets its takeoff airfield / time.
+FOREIGN_DEPARTURE_MAX_AGE_S = 12 * 3600
+
+# A visitor that leaves the visitor zone again (with this hysteresis
+# factor) is dropped from tracking silently.
+VISITOR_LEAVE_FACTOR = 1.2
+
+# Placeholder names when no known airport is nearby
+UNKNOWN_FIELD_NAME = "Feld"
+UNKNOWN_AIRFIELD_NAME = "unbekannt"
 
 # Silence-landing candidate: a beacon counts as "on final at home" when the
 # vertical speed is at most this (m/s) and the ground speed is below
@@ -135,6 +170,18 @@ class AirfieldConfig:
     # the "home area" precisely; the circular home_radius_m is then unused.
     # Typed as Any so this module does not hard-import shapely.
     home_polygon: Any = None
+    # Display name of the home airfield (takeoff_airfield / landing_airfield
+    # of home flights); falls back to the slug when empty.
+    name: str = ""
+    # Foreign airfields / visitors (defaults from settings.*, see config.py)
+    foreign_airfield_radius_m: int = 2000
+    visitor_zone_km: int = 15
+    visitor_max_agl_m: int = 1500
+    foreign_ground_max_entries: int = 5000
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.slug
 
 
 def _utcnow_iso() -> str:
@@ -172,6 +219,18 @@ def _seconds_since_iso(iso: str) -> float | None:
     return time.time() - ts
 
 
+def _bounded_put(d: dict, key: str, value: Any, max_entries: int) -> None:
+    """Insert into a dict that may hold at most ``max_entries`` keys.
+
+    When full, the oldest entry (insertion order) is evicted. Bounds the
+    per-airfield foreign ground / departure / visitor-candidate dicts,
+    which see every aircraft inside the APRS filter radius.
+    """
+    if key not in d and len(d) >= max(1, max_entries):
+        del d[next(iter(d))]
+    d[key] = value
+
+
 class FlightStateMachine:
     """Processes beacons and manages flight state transitions."""
 
@@ -191,6 +250,27 @@ class FlightStateMachine:
         # fast_since_ts remembers when the ground roll started so the takeoff
         # time is the start of the roll, not the moment we notice 50 m AGL.
         self._ground_cache: dict[str, dict[str, dict]] = {}
+
+        # Known airports (foreign landings, visitors). None / empty index
+        # = legacy behaviour: every landing away from home is an outlanding
+        # and aircraft that did not start at home are never tracked.
+        # Set by FlightTracker (like the terrain model).
+        self.airports: AirportIndex | None = None
+
+        # Aircraft seen on the ground at a FOREIGN airport (not tracked yet):
+        # airfield_slug -> { flarm_id -> {"first_seen": mono, "last_seen": mono,
+        #   "airport": Airport, "ref_elev": float, "speeds": deque,
+        #   "fast_since_ts": beacon_ts, "fast_count": int} }
+        # Same ground/takeoff logic as at home, referenced to the airport.
+        self._foreign_ground: dict[str, dict[str, dict]] = {}
+        # Takeoffs seen at foreign airports, consumed when the aircraft
+        # shows up in the visitor zone:
+        # airfield_slug -> { flarm_id -> {"takeoff_ts": beacon_ts, "airport": Airport} }
+        self._foreign_departures: dict[str, dict[str, dict]] = {}
+        # Untracked aircraft airborne inside the visitor zone, waiting for
+        # the confirmation beacons: airfield_slug -> { flarm_id -> {"count",
+        # "first_ts", "last_seen"} }
+        self._visitor_candidates: dict[str, dict[str, dict]] = {}
 
         # Events generated during processing (consumed by flight tracker)
         self._pending_events: list[dict] = []
@@ -287,126 +367,43 @@ class FlightStateMachine:
         if flight is None:
             # Not tracking this aircraft yet - check for takeoff
             if not at_home:
-                return None  # Not at home airfield, discard
-
-            # Ensure ground cache dict exists for this airfield
-            if slug not in self._ground_cache:
-                self._ground_cache[slug] = {}
-            gc = self._ground_cache[slug]
-
-            # Track aircraft seen stationary on the ground.
-            # Use this single beacon's speed/AGL to decide ground contact;
-            # the rolling buffer is only used for the takeoff trigger so a
-            # single GPS speed glitch cannot fire takeoff prematurely.
-            is_on_ground = (beacon.speed < config.ground_speed_max_kmh
-                            and agl_af < config.ground_max_agl_m)
-            if is_on_ground:
-                entry = gc.get(beacon.flarm_id)
-                if entry is None:
-                    entry = {"first_seen": now_mono,
-                             "speeds": deque(maxlen=SPEED_WINDOW_SIZE),
-                             "fast_since_ts": 0.0,
-                             "fast_count": 0}
-                    gc[beacon.flarm_id] = entry
-                    log.debug(
-                        "ground_contact",
-                        flarm_id=beacon.flarm_id,
-                        airfield=slug,
-                        speed=beacon.speed,
-                        agl=round(agl_af),
-                    )
-                entry["speeds"].append(beacon.speed)
-                entry["fast_since_ts"] = 0.0
-                entry["fast_count"] = 0
-                return None  # On ground, not airborne yet
-
-            # Aircraft is moving/airborne - check for takeoff
-            entry = gc.get(beacon.flarm_id)
-            was_on_ground = entry is not None
-            if was_on_ground:
-                entry["speeds"].append(beacon.speed)
-                avg_speed = sum(entry["speeds"]) / len(entry["speeds"])
+                # Away from home: ground contact / takeoff at a known
+                # foreign airport, or a visitor entering the zone around
+                # home. Returns a new FlightState only for a visitor.
+                flight = self._process_foreign_beacon(
+                    beacon, config, dist_m, agl_af, ts, now_mono
+                )
+                if flight is None:
+                    return None
+                # fall through: the visitor's beacon is processed as an
+                # airborne beacon of the new flight below
             else:
-                avg_speed = beacon.speed
-            # Use rolling-average speed (smoothed over last N beacons) to
-            # decide takeoff — robust against single-beacon GPS glitches.
-            is_fast = avg_speed >= config.takeoff_speed_kmh
-
-            confirmed = False
-            if was_on_ground:
-                # Remember when the ground roll started: first beacon at or
-                # above takeoff speed (raw, so the smoothing lag does not
-                # shift the takeoff time), reset if the roll is aborted.
-                # fast_count = consecutive raw-fast beacons (confirmation).
-                if beacon.speed >= config.takeoff_speed_kmh:
-                    if not entry["fast_since_ts"]:
-                        entry["fast_since_ts"] = ts
-                    entry["fast_count"] += 1
-                else:
-                    entry["fast_since_ts"] = 0.0
-                    entry["fast_count"] = 0
-                confirmed = self._takeoff_confirmed(entry["fast_count"], config)
-
-            if is_high and is_fast and not is_too_high and was_on_ground and not confirmed:
-                # Looks like a lift-off, but only one fast beacon so far: a
-                # single glitch must not start a flight. Wait for the next.
-                log.debug(
-                    "takeoff_unconfirmed",
-                    flarm_id=beacon.flarm_id,
-                    airfield=slug,
-                    fast_beacons=entry["fast_count"],
-                    speed=beacon.speed,
-                    agl=round(agl_af),
+                flight = self._process_home_ground_beacon(
+                    beacon, config, agl_af, is_high, is_too_high, ts, now_mono
                 )
-                return None
-
-            if is_high and is_fast and not is_too_high and was_on_ground:
-                # Aircraft was on ground and is now airborne - takeoff!
-                gc.pop(beacon.flarm_id, None)
-                roll_start = entry["fast_since_ts"]
-                if roll_start and 0 <= ts - roll_start <= config.takeoff_roll_max_s:
-                    takeoff_ts = roll_start
-                else:
-                    takeoff_ts = ts
-                flight = FlightState(
-                    flarm_id=beacon.flarm_id,
-                    airfield_slug=slug,
-                    airfield_id=config.id,
-                    status=FlightStatus.TAKEOFF,
-                    takeoff_time=_iso_from_ts(takeoff_ts),
-                )
-                if slug not in self.flights:
-                    self.flights[slug] = {}
-                self.flights[slug][beacon.flarm_id] = flight
-
-                self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
-                log.info(
-                    "takeoff_detected",
-                    flarm_id=beacon.flarm_id,
-                    airfield=slug,
-                    altitude=beacon.altitude,
-                    speed=beacon.speed,
-                    takeoff_time=flight.takeoff_time,
-                )
-            elif not was_on_ground:
-                log.debug(
-                    "overflight_ignored",
-                    flarm_id=beacon.flarm_id,
-                    airfield=slug,
-                    agl=round(agl_af),
-                    speed=beacon.speed,
-                    reason="not_seen_on_ground",
-                )
-                return None  # Never seen on ground - overflight
-            else:
-                return None  # At home but not yet taking off
+                if flight is None:
+                    return None
 
         # ----- Landed flight: touch & go / final landing / restart -----
         # An already-landed flight stays in the hot state with status LANDING
         # so the tower controller still sees it. A re-takeoff of the SAME
         # aircraft is either a touch & go (same flight continues), a bounce
         # (landing retracted) or - once the landing is final - a new flight.
+        # The reference is the landing site: the home airfield or, after a
+        # landing at a foreign airport, that airport (_landing_ref_*).
         elif flight.status == FlightStatus.LANDING:
+            if flight.landing_type == "foreign" and flight._landing_ref_lat:
+                ref_elev = flight._landing_ref_elev
+                at_ref = haversine(
+                    beacon.lat, beacon.lon, flight._landing_ref_lat, flight._landing_ref_lon
+                ) <= config.foreign_airfield_radius_m
+                agl_ref = altitude_agl(beacon.altitude, ref_elev)
+                is_high_ref = beacon.altitude > ref_elev + config.takeoff_alt_offset_m
+                is_too_high_ref = agl_ref > config.takeoff_max_agl_m
+            else:
+                at_ref, agl_ref = at_home, agl_af
+                is_high_ref, is_too_high_ref = is_high, is_too_high
+
             avg_speed = flight.push_speed(beacon.speed)
             is_fast = avg_speed >= config.takeoff_speed_kmh
             flight._last_beacon_ts = ts
@@ -431,15 +428,37 @@ class FlightStateMachine:
             # hole may re-appear far from the runway)
             clearly_airborne = (agl > config.near_ground_band_m
                                 and beacon.speed >= config.takeoff_speed_kmh)
+            # A non-final landing at a foreign airport is retracted when
+            # the aircraft is clearly airborne again AWAY from that
+            # airport (a slow low pass that looked like a landing there).
+            # At the airport itself a re-takeoff is a T&G / restart.
+            foreign_airborne_away = (
+                flight.landing_type == "foreign" and not at_ref
+                and agl > config.outlanding_recover_agl_m
+                and beacon.speed >= config.takeoff_speed_kmh
+            )
 
-            if (flight.landing_method == "silence" and not flight.landing_final
-                    and clearly_airborne):
-                # Aircraft re-appeared airborne (anywhere) before the silence
-                # landing became final -> it was a radio hole on final /
-                # go-around, not a landing (no phantom).
-                self._retract_landing(slug, flight, "silence_phantom")
+            if (not flight.landing_final and clearly_airborne
+                    and (flight.landing_method == "silence" or foreign_airborne_away)):
+                # Aircraft re-appeared airborne before the landing became
+                # final -> radio hole on final / go-around / low pass,
+                # not a landing (no phantom).
+                if flight.landing_method == "silence":
+                    reason = "silence_phantom"
+                else:
+                    reason = "foreign_phantom"
+                    log.info(
+                        "foreign_landing_retracted",
+                        flarm_id=beacon.flarm_id,
+                        airfield=slug,
+                        landing_airfield=flight.landing_airfield,
+                        landing_time=flight.landing_time,
+                        agl=round(agl),
+                        speed=beacon.speed,
+                    )
+                self._retract_landing(slug, flight, reason)
                 # fall through: processed as an airborne beacon below
-            elif (at_home and is_high and is_fast and not is_too_high
+            elif (at_ref and is_high_ref and is_fast and not is_too_high_ref
                     and not restart_confirmed):
                 # Single fast + high beacon on a landed aircraft: glitch
                 # guard, same as for the initial takeoff. Treated as a
@@ -450,12 +469,12 @@ class FlightStateMachine:
                     airfield=slug,
                     fast_beacons=flight._restart_fast_count,
                     speed=beacon.speed,
-                    agl=round(agl_af),
+                    agl=round(agl_ref),
                 )
                 flight.last_seen = now_iso
                 flight.elapsed_s = 0
                 return flight
-            elif at_home and is_high and is_fast and not is_too_high:
+            elif at_ref and is_high_ref and is_fast and not is_too_high_ref:
                 if not flight.landing_final:
                     if ground_elapsed < config.bounce_debounce_s:
                         # Bounce / premature detection: not a landing at all
@@ -476,18 +495,26 @@ class FlightStateMachine:
                         flarm_id=beacon.flarm_id,
                         airfield=slug,
                         previous_landing=old_flight.landing_time,
+                        previous_landing_airfield=old_flight.landing_airfield,
                     )
                     roll_start = old_flight._restart_fast_since_ts
                     if roll_start and 0 <= ts - roll_start <= config.takeoff_roll_max_s:
                         takeoff_ts = roll_start
                     else:
                         takeoff_ts = ts
+                    # A restart from a foreign airport starts there; at
+                    # home it is a regular home flight (visitors included).
+                    if old_flight.landing_type == "foreign":
+                        takeoff_af = old_flight.landing_airfield
+                    else:
+                        takeoff_af = config.display_name
                     flight = FlightState(
                         flarm_id=beacon.flarm_id,
                         airfield_slug=slug,
                         airfield_id=config.id,
                         status=FlightStatus.TAKEOFF,
                         takeoff_time=_iso_from_ts(takeoff_ts),
+                        takeoff_airfield=takeoff_af,
                     )
                     self.flights[slug][beacon.flarm_id] = flight
                     self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
@@ -501,12 +528,65 @@ class FlightStateMachine:
                 flight.last_seen = now_iso
                 flight.elapsed_s = 0
                 # Touch & go confidence is about the runway -> airfield AGL
-                flight._ground_min_agl = min(flight._ground_min_agl, agl_af)
+                flight._ground_min_agl = min(flight._ground_min_agl, agl_ref)
                 flight._ground_min_speed = min(flight._ground_min_speed, beacon.speed)
                 if (not flight.landing_final
                         and ground_elapsed > self._final_delay_s(flight, config)):
                     self._finalize_landing(slug, flight)
                 return flight
+
+        # ----- Return after a confirmed outlanding (P1) -----
+        # A confirmed outlanding is the end of that flight. When the
+        # aircraft is clearly airborne again (motor glider after a pause,
+        # retrieve by air) the outlanded flight is archived exactly like a
+        # landed flight on a restart (flight_restarted -> flight_log,
+        # landing_type 'outlanding') and a NEW flight starts at the
+        # outlanding site. When it turns up on the ground at home without
+        # any airborne beacon in between (retrieved by trailer, radio hole
+        # on the way back) the outlanded flight is archived as well, but
+        # no flight without a takeoff time is invented: the aircraft is
+        # simply forgotten and becomes a normal home ground contact.
+        elif flight.status in OUTLANDED_STATUSES:
+            # Raw speed here: the flight's speed window is full of the
+            # outlanding's zeros; OUTLANDING_RECOVER_MIN_BEACONS consecutive
+            # beacons are the glitch guard.
+            is_slow = beacon.speed < config.landing_speed_kmh
+            near_ground = abs(beacon.altitude - config.elevation_m) <= config.near_ground_band_m
+            airborne_again = (beacon.speed >= config.takeoff_speed_kmh
+                              and agl > config.outlanding_recover_agl_m)
+            if airborne_again:
+                if flight._outlanding_airborne_count == 0:
+                    flight._outlanding_airborne_since_ts = ts
+                flight._outlanding_airborne_count += 1
+            else:
+                flight._outlanding_airborne_count = 0
+                flight._outlanding_airborne_since_ts = 0.0
+            returned_home = at_home and is_slow and near_ground
+            if flight._outlanding_airborne_count >= OUTLANDING_RECOVER_MIN_BEACONS:
+                flight = self._restart_after_outlanding(
+                    slug, flight, config, takeoff_ts=flight._outlanding_airborne_since_ts
+                )
+            elif returned_home:
+                self._forget_after_outlanding(slug, flight)
+                # This beacon is the first home ground contact of the
+                # (now untracked) aircraft; a later takeoff is a normal
+                # home flight.
+                return self._process_home_ground_beacon(
+                    beacon, config, agl_af, is_high, is_too_high, ts, now_mono
+                )
+            else:
+                # Still sitting in the field: position refresh only
+                flight.latitude = beacon.lat
+                flight.longitude = beacon.lon
+                flight.altitude_m = beacon.altitude
+                flight.altitude_agl = agl
+                flight.speed_kmh = beacon.speed
+                flight.last_seen = now_iso
+                flight.elapsed_s = 0
+                flight._last_beacon_ts = ts
+                return flight
+            # fall through: the beacon is processed as an airborne beacon
+            # of the new flight (which may land at home right away)
 
         # Push speed into the rolling buffer and use the smoothed value for
         # the landing decision (matches PyAcphFlightsLogbook's approach).
@@ -543,15 +623,34 @@ class FlightStateMachine:
 
         # --- State transitions ---
 
-        # Landing detection at home airfield
-        # Requires: at home + smoothed speed below threshold + altitude band,
-        # sustained for hysteresis_s of *beacon* time. The landing time is
-        # the start of the slow phase (touchdown), not the end of the
-        # hysteresis.
-        if at_home and is_slow and near_ground and flight.status in AIRBORNE_STATUSES:
-            if flight._slow_since == 0:
-                flight._slow_since = ts
-            elif (ts - flight._slow_since) >= config.hysteresis_s:
+        # Visitors that leave the zone again without landing are dropped
+        # silently (no signal-loss alarms for aircraft that never landed
+        # here). The tracker removes the flight on ``visitor_left``.
+        if (flight.is_visitor and flight.status in AIRBORNE_STATUSES
+                and dist_m > config.visitor_zone_km * 1000.0 * VISITOR_LEAVE_FACTOR):
+            self._drop_visitor(slug, flight, "left_zone")
+            return None
+
+        # Landing detection: at home (speed + altitude band) or at a known
+        # foreign airport (speed + low over terrain + within
+        # foreign_airfield_radius_m of the airport), sustained for
+        # hysteresis_s of *beacon* time. The landing time is the start of
+        # the slow phase (touchdown), not the end of the hysteresis.
+        landing_site: str | Airport | None = None
+        if is_slow and flight.status in LANDABLE_STATUSES:
+            if at_home:
+                if near_ground:
+                    landing_site = "home"
+            elif agl < config.outlanding_max_agl_m:
+                airport = self._nearest_airport(beacon.lat, beacon.lon, config)
+                if airport is not None and self._low_over_airport(beacon.altitude, airport, config):
+                    landing_site = airport
+        if landing_site is None:
+            flight._slow_since = 0.0
+        elif flight._slow_since == 0:
+            flight._slow_since = ts
+        elif (ts - flight._slow_since) >= config.hysteresis_s:
+            if landing_site == "home":
                 self._land(
                     slug, flight, config,
                     landing_ts=flight._slow_since,
@@ -559,16 +658,31 @@ class FlightStateMachine:
                     confidence=1.0,
                     message="Landung am Heimatplatz",
                 )
-                log.info(
-                    "landing_detected",
-                    flarm_id=beacon.flarm_id,
-                    airfield=slug,
-                    takeoff_time=flight.takeoff_time,
-                    landing_time=flight.landing_time,
-                    landing_count=flight.landing_count,
+            elif flight.is_visitor:
+                # A visitor landing at another airport inside the zone
+                # never was this airfield's flight: no landing here, no
+                # flight_log row - just forget it.
+                self._drop_visitor(slug, flight, "landed_elsewhere")
+                return None
+            else:
+                self._land(
+                    slug, flight, config,
+                    landing_ts=flight._slow_since,
+                    method="observed",
+                    confidence=1.0,
+                    message=f"Landung in {landing_site.display_name}",
+                    airport=landing_site,
                 )
-        else:
-            flight._slow_since = 0.0
+            log.info(
+                "landing_detected",
+                flarm_id=beacon.flarm_id,
+                airfield=slug,
+                takeoff_time=flight.takeoff_time,
+                landing_time=flight.landing_time,
+                landing_count=flight.landing_count,
+                landing_type=flight.landing_type,
+                landing_airfield=flight.landing_airfield,
+            )
 
         # Silence-landing candidate: remember the last beacon that looks
         # like a final approach at home (low, slow, not climbing). If the
@@ -607,17 +721,27 @@ class FlightStateMachine:
             )
             log.info("signal_recovered", flarm_id=beacon.flarm_id, airfield=slug)
 
-        # Outlanding detection: slow and low (terrain AGL), away from home
+        # Outlanding suspicion: slow and low (terrain AGL), away from home
+        # and NOT at a known airport (that would be a landing there)
         if (flight.status in (FlightStatus.FLYING, FlightStatus.TAKEOFF)
-                and not at_home and is_slow and agl < config.outlanding_max_agl_m):
+                and not at_home and is_slow and agl < config.outlanding_max_agl_m
+                and landing_site is None):
+            if flight.is_visitor:
+                # Visitors never enter the outlanding / alarm paths: an
+                # aircraft going down away from home that did not start
+                # here is its own home field's business. Forget it.
+                self._drop_visitor(slug, flight, "outlanding")
+                return None
             flight.status = FlightStatus.OUTLANDING_PENDING
             flight.outlanding_pending_since = now_mono
+            flight._outlanding_pending_ts = ts
 
         # Outlanding recovery: speed picked up again
         if flight.status == FlightStatus.OUTLANDING_PENDING:
             if not is_slow or agl > config.outlanding_recover_agl_m:
                 flight.status = FlightStatus.FLYING
                 flight.outlanding_pending_since = 0
+                flight._outlanding_pending_ts = 0.0
 
         if flight.status != old_status:
             log.debug(
@@ -628,6 +752,419 @@ class FlightStateMachine:
             )
 
         return flight
+
+    # ------------------------------------------------------------------
+    # Untracked aircraft: ground contact / takeoff at home
+    # ------------------------------------------------------------------
+
+    def _process_home_ground_beacon(self, beacon: Beacon, config: AirfieldConfig,
+                                    agl_af: float, is_high: bool, is_too_high: bool,
+                                    ts: float, now_mono: float) -> FlightState | None:
+        """Beacon of an untracked aircraft inside the home area.
+
+        Tracks ground contact and declares the takeoff; returns the new
+        FlightState (status TAKEOFF) or None.
+        """
+        slug = config.slug
+        # Ensure ground cache dict exists for this airfield
+        if slug not in self._ground_cache:
+            self._ground_cache[slug] = {}
+        gc = self._ground_cache[slug]
+
+        # Track aircraft seen stationary on the ground.
+        # Use this single beacon's speed/AGL to decide ground contact;
+        # the rolling buffer is only used for the takeoff trigger so a
+        # single GPS speed glitch cannot fire takeoff prematurely.
+        is_on_ground = (beacon.speed < config.ground_speed_max_kmh
+                        and agl_af < config.ground_max_agl_m)
+        if is_on_ground:
+            entry = gc.get(beacon.flarm_id)
+            if entry is None:
+                entry = {"first_seen": now_mono,
+                         "speeds": deque(maxlen=SPEED_WINDOW_SIZE),
+                         "fast_since_ts": 0.0,
+                         "fast_count": 0}
+                gc[beacon.flarm_id] = entry
+                log.debug(
+                    "ground_contact",
+                    flarm_id=beacon.flarm_id,
+                    airfield=slug,
+                    speed=beacon.speed,
+                    agl=round(agl_af),
+                )
+            entry["speeds"].append(beacon.speed)
+            entry["fast_since_ts"] = 0.0
+            entry["fast_count"] = 0
+            return None  # On ground, not airborne yet
+
+        # Aircraft is moving/airborne - check for takeoff
+        entry = gc.get(beacon.flarm_id)
+        was_on_ground = entry is not None
+        if not was_on_ground:
+            log.debug(
+                "overflight_ignored",
+                flarm_id=beacon.flarm_id,
+                airfield=slug,
+                agl=round(agl_af),
+                speed=beacon.speed,
+                reason="not_seen_on_ground",
+            )
+            return None  # Never seen on ground - overflight
+
+        takeoff_ts = self._ground_roll_takeoff(entry, beacon, config, is_high, is_too_high, ts)
+        if takeoff_ts is None:
+            return None  # At home but not (yet) taking off
+
+        # Aircraft was on ground and is now airborne - takeoff!
+        gc.pop(beacon.flarm_id, None)
+        flight = FlightState(
+            flarm_id=beacon.flarm_id,
+            airfield_slug=slug,
+            airfield_id=config.id,
+            status=FlightStatus.TAKEOFF,
+            takeoff_time=_iso_from_ts(takeoff_ts),
+            takeoff_airfield=config.display_name,
+        )
+        if slug not in self.flights:
+            self.flights[slug] = {}
+        self.flights[slug][beacon.flarm_id] = flight
+
+        self._emit_event(slug, "takeoff", beacon.flarm_id, flight)
+        log.info(
+            "takeoff_detected",
+            flarm_id=beacon.flarm_id,
+            airfield=slug,
+            altitude=beacon.altitude,
+            speed=beacon.speed,
+            takeoff_time=flight.takeoff_time,
+        )
+        return flight
+
+    def _ground_roll_takeoff(self, entry: dict, beacon: Beacon, config: AirfieldConfig,
+                             is_high: bool, is_too_high: bool, ts: float) -> float | None:
+        """Takeoff decision for an aircraft with a ground-cache entry.
+
+        Shared by the home ground cache and the foreign ground cache
+        (``is_high`` / ``is_too_high`` are relative to the respective
+        reference elevation). Updates the entry's speed window and ground
+        roll bookkeeping; returns the takeoff timestamp (start of the
+        ground roll when it was short enough, else this beacon) once the
+        takeoff is confirmed, None otherwise.
+        """
+        entry["speeds"].append(beacon.speed)
+        avg_speed = sum(entry["speeds"]) / len(entry["speeds"])
+        # Use rolling-average speed (smoothed over last N beacons) to
+        # decide takeoff — robust against single-beacon GPS glitches.
+        is_fast = avg_speed >= config.takeoff_speed_kmh
+
+        # Remember when the ground roll started: first beacon at or
+        # above takeoff speed (raw, so the smoothing lag does not
+        # shift the takeoff time), reset if the roll is aborted.
+        # fast_count = consecutive raw-fast beacons (confirmation).
+        if beacon.speed >= config.takeoff_speed_kmh:
+            if not entry["fast_since_ts"]:
+                entry["fast_since_ts"] = ts
+            entry["fast_count"] += 1
+        else:
+            entry["fast_since_ts"] = 0.0
+            entry["fast_count"] = 0
+        confirmed = self._takeoff_confirmed(entry["fast_count"], config)
+
+        if not (is_high and is_fast and not is_too_high):
+            return None
+        if not confirmed:
+            # Looks like a lift-off, but only one fast beacon so far: a
+            # single glitch must not start a flight. Wait for the next.
+            log.debug(
+                "takeoff_unconfirmed",
+                flarm_id=beacon.flarm_id,
+                airfield=config.slug,
+                fast_beacons=entry["fast_count"],
+                speed=beacon.speed,
+            )
+            return None
+        roll_start = entry["fast_since_ts"]
+        if roll_start and 0 <= ts - roll_start <= config.takeoff_roll_max_s:
+            return roll_start
+        return ts
+
+    # ------------------------------------------------------------------
+    # Untracked aircraft away from home: foreign airports and visitors
+    # ------------------------------------------------------------------
+
+    def _process_foreign_beacon(self, beacon: Beacon, config: AirfieldConfig,
+                                dist_m: float, agl_af: float, ts: float,
+                                now_mono: float) -> FlightState | None:
+        """Beacon of an untracked aircraft outside the home area.
+
+        Two things can happen here (docs/dev-guides/implement-flight-logic.md,
+        "Fremde Flugplaetze / Besucher"):
+
+        1. Ground contact / takeoff at a *known* airport (AirportIndex,
+           within ``foreign_airfield_radius_m``): the same ground-cache
+           logic as at home, referenced to the airport elevation. A
+           confirmed takeoff is remembered in ``_foreign_departures`` (no
+           FlightState yet - most of these aircraft never come here).
+        2. Airborne inside the *visitor zone* around home: after the
+           confirmation beacons a FlightState with ``is_visitor`` is
+           created (takeoff airfield / time from 1. when known) so the
+           landing at home is visible. Returns that FlightState.
+
+        The hot path stays cheap: a fast beacon far from home costs one
+        dict lookup and a distance compare; the airport lookup only runs
+        for slow beacons (ground contact candidates).
+        """
+        slug = config.slug
+        fid = beacon.flarm_id
+        fg = self._foreign_ground.setdefault(slug, {})
+        entry = fg.get(fid)
+
+        if entry is None:
+            if beacon.speed < config.ground_speed_max_kmh:
+                # Slow away from home: on the ground at a known airport?
+                # (and certainly not a visitor candidate right now)
+                self._visitor_candidates.get(slug, {}).pop(fid, None)
+                self._foreign_ground_contact(slug, fid, beacon, config, now_mono)
+                return None
+        else:
+            ref_elev = entry["ref_elev"]
+            agl_ap = altitude_agl(beacon.altitude, ref_elev)
+            entry["last_seen"] = now_mono
+            if beacon.speed < config.ground_speed_max_kmh and agl_ap < config.ground_max_agl_m:
+                entry["speeds"].append(beacon.speed)
+                entry["fast_since_ts"] = 0.0
+                entry["fast_count"] = 0
+                return None  # still on the ground there
+            is_high = beacon.altitude > ref_elev + config.takeoff_alt_offset_m
+            is_too_high = agl_ap > config.takeoff_max_agl_m
+            takeoff_ts = self._ground_roll_takeoff(entry, beacon, config, is_high, is_too_high, ts)
+            if takeoff_ts is not None:
+                fg.pop(fid, None)
+                self._remember_departure(slug, fid, takeoff_ts, entry["airport"], config)
+            elif is_too_high:
+                # Stale ground entry (takeoff missed in a radio hole): the
+                # aircraft is far above the airport, forget the contact.
+                fg.pop(fid, None)
+            else:
+                return None  # rolling / lifting off, not confirmed yet
+
+        return self._visitor_check(slug, fid, beacon, config, dist_m, agl_af, ts, now_mono)
+
+    def _foreign_ground_contact(self, slug: str, fid: str, beacon: Beacon,
+                                config: AirfieldConfig, now_mono: float) -> None:
+        """Record a slow beacon as ground contact at the nearest known airport."""
+        airport = self._nearest_airport(beacon.lat, beacon.lon, config)
+        if airport is None:
+            return
+        # Ground reference: the airport elevation; without one, the
+        # altitude of this (slow) beacon is the best available guess.
+        ref_elev = airport.elevation_m if airport.elevation_m is not None else beacon.altitude
+        if altitude_agl(beacon.altitude, ref_elev) >= config.ground_max_agl_m:
+            return  # slow but well above the airport (thermalling overhead)
+        fg = self._foreign_ground.setdefault(slug, {})
+        entry = {
+            "first_seen": now_mono,
+            "last_seen": now_mono,
+            "airport": airport,
+            "ref_elev": ref_elev,
+            "speeds": deque([beacon.speed], maxlen=SPEED_WINDOW_SIZE),
+            "fast_since_ts": 0.0,
+            "fast_count": 0,
+        }
+        _bounded_put(fg, fid, entry, config.foreign_ground_max_entries)
+        log.debug(
+            "foreign_ground_contact",
+            flarm_id=fid,
+            airfield=slug,
+            airport=airport.display_name,
+            speed=beacon.speed,
+        )
+
+    def _remember_departure(self, slug: str, fid: str, takeoff_ts: float,
+                            airport: Airport, config: AirfieldConfig) -> None:
+        """Keep a confirmed takeoff at a foreign airport (bounded, 12 h)."""
+        deps = self._foreign_departures.setdefault(slug, {})
+        _bounded_put(deps, fid, {"takeoff_ts": takeoff_ts, "airport": airport},
+                     config.foreign_ground_max_entries)
+        log.info(
+            "foreign_takeoff_detected",
+            flarm_id=fid,
+            airfield=slug,
+            airport=airport.display_name,
+            takeoff_time=_iso_from_ts(takeoff_ts),
+        )
+
+    def _visitor_check(self, slug: str, fid: str, beacon: Beacon, config: AirfieldConfig,
+                       dist_m: float, agl_af: float, ts: float,
+                       now_mono: float) -> FlightState | None:
+        """Airborne inside the visitor zone? Confirm and create the visitor flight."""
+        if config.visitor_zone_km <= 0:
+            return None  # visitor detection switched off for this airfield
+        vc = self._visitor_candidates.setdefault(slug, {})
+        qualifies = (
+            dist_m <= config.visitor_zone_km * 1000.0
+            and beacon.speed >= config.takeoff_speed_kmh
+            and config.ground_max_agl_m < agl_af <= config.visitor_max_agl_m
+        )
+        if not qualifies:
+            vc.pop(fid, None)
+            return None
+        cand = vc.get(fid)
+        if cand is None:
+            cand = {"count": 0, "first_ts": ts, "last_seen": now_mono}
+            _bounded_put(vc, fid, cand, config.foreign_ground_max_entries)
+        cand["count"] += 1
+        cand["last_seen"] = now_mono
+        if cand["count"] < max(1, config.takeoff_min_fast_beacons):
+            return None
+        vc.pop(fid, None)
+
+        departure = self._foreign_departures.get(slug, {}).pop(fid, None)
+        if departure is not None:
+            takeoff_time = _iso_from_ts(departure["takeoff_ts"])
+            takeoff_airfield = departure["airport"].display_name
+        else:
+            takeoff_time = ""
+            takeoff_airfield = UNKNOWN_AIRFIELD_NAME
+        flight = FlightState(
+            flarm_id=fid,
+            airfield_slug=slug,
+            airfield_id=config.id,
+            status=FlightStatus.FLYING,
+            takeoff_time=takeoff_time,
+            takeoff_airfield=takeoff_airfield,
+            is_visitor=True,
+            visitor_since=_iso_from_ts(cand["first_ts"]),
+        )
+        if slug not in self.flights:
+            self.flights[slug] = {}
+        self.flights[slug][fid] = flight
+        self._emit_event(
+            slug, "visitor_arrived", fid, flight,
+            message=f"Besucher aus {takeoff_airfield}",
+        )
+        log.info(
+            "visitor_arrived",
+            flarm_id=fid,
+            airfield=slug,
+            takeoff_airfield=takeoff_airfield,
+            takeoff_time=takeoff_time,
+            distance_km=round(dist_m / 1000, 1),
+        )
+        return flight
+
+    def _drop_visitor(self, slug: str, flight: FlightState, reason: str) -> None:
+        """Forget a visitor that never landed here (zone left / signal gone)."""
+        self.flights.get(slug, {}).pop(flight.flarm_id, None)
+        log.info(
+            "visitor_left",
+            flarm_id=flight.flarm_id,
+            airfield=slug,
+            reason=reason,
+            takeoff_airfield=flight.takeoff_airfield,
+        )
+        self._emit_event(
+            slug, "visitor_left", flight.flarm_id, flight,
+            message=f"Besucher wieder weg ({reason})",
+        )
+
+    def _nearest_airport(self, lat: float, lon: float,
+                         config: AirfieldConfig) -> Airport | None:
+        """Known airport within foreign_airfield_radius_m, or None (no index)."""
+        if not self.airports:
+            return None
+        return self.airports.nearest(lat, lon, config.foreign_airfield_radius_m)
+
+    @staticmethod
+    def _low_over_airport(altitude_m: float, airport: Airport,
+                          config: AirfieldConfig) -> bool:
+        """Whether an altitude is low enough over an airport to be landing there.
+
+        Same band as at home: within ``near_ground_band_m`` of the airport
+        elevation when it is known (the terrain AGL alone would accept a
+        slow pass along a slope 2 km from a valley airport). Without an
+        elevation only the terrain-AGL pre-check of the caller applies.
+        """
+        if airport.elevation_m is None:
+            return True
+        return abs(altitude_m - airport.elevation_m) <= config.near_ground_band_m
+
+    @staticmethod
+    def _close_outlanding(flight: FlightState) -> None:
+        """Make a confirmed outlanding the flight's landing (idempotent)."""
+        if not flight.landing_time:
+            flight.landing_time = _iso_from_ts(
+                flight._outlanding_pending_ts or flight._last_beacon_ts
+            )
+        if not flight.landing_type:
+            flight.landing_type = "outlanding"
+
+    def _forget_after_outlanding(self, slug: str, flight: FlightState) -> None:
+        """Archive a confirmed outlanding whose aircraft is back on the ground at home.
+
+        Emits ``outlanding_returned``: the tracker writes the flight to
+        flight_log (landing_type 'outlanding') and removes it from the hot
+        state. No new flight is started - there is no takeoff time to
+        give it - the aircraft is a plain home ground contact from here on.
+        """
+        self._close_outlanding(flight)
+        self.flights.get(slug, {}).pop(flight.flarm_id, None)
+        self._emit_event(
+            slug, "outlanding_returned", flight.flarm_id, flight,
+            message="Nach Aussenlandung wieder am Heimatplatz",
+        )
+        log.info(
+            "outlanding_returned_home",
+            flarm_id=flight.flarm_id,
+            airfield=slug,
+            outlanding_time=flight.landing_time,
+        )
+
+    def _restart_after_outlanding(self, slug: str, flight: FlightState,
+                                  config: AirfieldConfig, takeoff_ts: float) -> FlightState:
+        """Archive a confirmed outlanding and start a new flight from the site.
+
+        Mirrors the restart of a landed aircraft: ``flight_restarted`` for
+        the old flight (the tracker writes it to flight_log with its
+        outlanding as landing) and ``takeoff`` for the new one. The new
+        flight starts at the nearest known airport or in the field
+        (``UNKNOWN_FIELD_NAME``) at ``takeoff_ts`` (first airborne beacon).
+        """
+        old = flight
+        self._close_outlanding(old)
+        self._emit_event(
+            slug, "flight_restarted", old.flarm_id, old,
+            message="Weiterflug nach Aussenlandung",
+        )
+        airport = self._nearest_airport(old.latitude, old.longitude, config)
+        takeoff_airfield = airport.display_name if airport else UNKNOWN_FIELD_NAME
+        new = FlightState(
+            flarm_id=old.flarm_id,
+            airfield_slug=slug,
+            airfield_id=config.id,
+            registration=old.registration,
+            aircraft_model=old.aircraft_model,
+            competition_sign=old.competition_sign,
+            aircraft_role=old.aircraft_role,
+            flarm_aircraft_type=old.flarm_aircraft_type,
+            status=FlightStatus.TAKEOFF,
+            takeoff_time=_iso_from_ts(takeoff_ts or old._last_beacon_ts),
+            takeoff_airfield=takeoff_airfield,
+        )
+        self.flights[slug][old.flarm_id] = new
+        self._emit_event(
+            slug, "takeoff", old.flarm_id, new,
+            message=f"Weiterflug nach Aussenlandung ({takeoff_airfield})",
+        )
+        log.info(
+            "outlanding_recovered",
+            flarm_id=old.flarm_id,
+            airfield=slug,
+            outlanding_time=old.landing_time,
+            takeoff_airfield=takeoff_airfield,
+            takeoff_time=new.takeoff_time,
+        )
+        return new
 
     def check_timeouts(self, configs: dict[str, AirfieldConfig]) -> list[FlightState]:
         """Check all active flights for time-based transitions.
@@ -723,6 +1260,21 @@ class FlightStateMachine:
                     changed.append(flight)
                     continue
 
+                # Visitors that fall silent before landing here are not
+                # this airfield's responsibility: drop them instead of
+                # escalating (the home field of the aircraft alarms). A
+                # visitor in OUTLANDING_PENDING (only possible from a hot
+                # state written by an older worker) is dropped as well -
+                # visitors never reach OUTLANDING / SIGNAL_LOST / ALARM.
+                if flight.is_visitor:
+                    if flight.status == FlightStatus.OUTLANDING_PENDING:
+                        self._drop_visitor(slug, flight, "outlanding")
+                        continue
+                    if (flight.status in AIRBORNE_STATUSES
+                            and flight.elapsed_s > config.signal_loss_timeout_s):
+                        self._drop_visitor(slug, flight, "signal_lost")
+                        continue
+
                 # Stage 1: SIGNAL_LOST (yellow). Triggered when a flying
                 # aircraft hasn't been heard from for signal_loss_timeout_s.
                 if (flight.elapsed_s > config.signal_loss_timeout_s
@@ -773,6 +1325,16 @@ class FlightStateMachine:
                     pending_elapsed = now_mono - flight.outlanding_pending_since
                     if pending_elapsed > config.outlanding_timeout_s:
                         flight.status = FlightStatus.OUTLANDING
+                        # The outlanding is this flight's landing: time =
+                        # start of the suspicion (touchdown), no airfield.
+                        flight.landing_time = _iso_from_ts(
+                            flight._outlanding_pending_ts or flight._last_beacon_ts
+                            or time.time()
+                        )
+                        flight.landing_type = "outlanding"
+                        flight.landing_airfield = ""
+                        flight._outlanding_airborne_count = 0
+                        flight._outlanding_airborne_since_ts = 0.0
                         self._emit_event(
                             slug, "outlanding", flarm_id, flight,
                             message=(
@@ -794,6 +1356,21 @@ class FlightStateMachine:
                      if (now_mono - e["first_seen"]) > self.GROUND_CACHE_MAX_AGE_S]
             for fid in stale:
                 del gc[fid]
+
+        # Foreign ground contacts / visitor candidates not refreshed for
+        # 2 h, departures older than 12 h (beacon time vs wallclock)
+        for cache in (self._foreign_ground, self._visitor_candidates):
+            for slug, entries in list(cache.items()):
+                stale = [fid for fid, e in entries.items()
+                         if (now_mono - e["last_seen"]) > self.GROUND_CACHE_MAX_AGE_S]
+                for fid in stale:
+                    del entries[fid]
+        now_wall = time.time()
+        for slug, deps in list(self._foreign_departures.items()):
+            stale = [fid for fid, e in deps.items()
+                     if (now_wall - e["takeoff_ts"]) > FOREIGN_DEPARTURE_MAX_AGE_S]
+            for fid in stale:
+                del deps[fid]
 
         return changed
 
@@ -822,6 +1399,17 @@ class FlightStateMachine:
             self.flights[airfield_slug] = {}
         if flight.status == FlightStatus.LANDING and flight.landing_time:
             flight._landing_ts = _ts_from_iso(flight.landing_time)
+            if flight.landing_type == "foreign":
+                # Restart / touch & go reference: the airport when the
+                # index knows it, else the last (ground) position.
+                airport = None
+                if self.airports:
+                    airport = self.airports.nearest(
+                        flight.latitude, flight.longitude, 10_000
+                    )
+                self._set_landing_ref(flight, airport)
+        if flight.status in OUTLANDED_STATUSES and flight.landing_time:
+            flight._outlanding_pending_ts = _ts_from_iso(flight.landing_time)
         self.flights[airfield_slug][flight.flarm_id] = flight
 
     # ------------------------------------------------------------------
@@ -857,8 +1445,14 @@ class FlightStateMachine:
 
     def _land(self, slug: str, flight: FlightState, config: AirfieldConfig,
               landing_ts: float, method: str, confidence: float,
-              message: str) -> None:
-        """Transition an airborne flight to LANDING and emit the event."""
+              message: str, airport: Airport | None = None) -> None:
+        """Transition an airborne flight to LANDING and emit the event.
+
+        ``airport`` = None: landing at home (landing_type 'home', the home
+        airfield name). Otherwise a landing at that known foreign airport
+        (landing_type 'foreign', its display name); restart / touch & go
+        are then judged relative to the airport (``_landing_ref_*``).
+        """
         flight.status = FlightStatus.LANDING
         flight.landing_time = _iso_from_ts(landing_ts)
         flight._landing_ts = landing_ts
@@ -868,10 +1462,36 @@ class FlightStateMachine:
         flight._slow_since = 0.0
         flight._silence_candidate_ts = 0.0
         flight._silence_candidate_conf = 0.0
+        flight.outlanding_pending_since = 0
+        flight._outlanding_pending_ts = 0.0
+        if airport is None:
+            flight.landing_type = "home"
+            flight.landing_airfield = config.display_name
+            flight._landing_ref_lat = config.latitude
+            flight._landing_ref_lon = config.longitude
+            flight._landing_ref_elev = config.elevation_m
+        else:
+            flight.landing_type = "foreign"
+            flight.landing_airfield = airport.display_name
+            self._set_landing_ref(flight, airport)
         # Runway-relative (touch & go confidence), not terrain AGL
-        flight._ground_min_agl = altitude_agl(flight.altitude_m, config.elevation_m)
+        flight._ground_min_agl = altitude_agl(flight.altitude_m, flight._landing_ref_elev)
         flight._ground_min_speed = flight.speed_kmh
         self._emit_event(slug, "landing", flight.flarm_id, flight, message=message)
+
+    @staticmethod
+    def _set_landing_ref(flight: FlightState, airport: Airport | None) -> None:
+        """Reference point of a foreign landing: the airport, else the
+        aircraft's own (ground) position and altitude."""
+        if airport is not None:
+            flight._landing_ref_lat = airport.latitude
+            flight._landing_ref_lon = airport.longitude
+            flight._landing_ref_elev = (airport.elevation_m if airport.elevation_m is not None
+                                        else flight.altitude_m)
+        else:
+            flight._landing_ref_lat = flight.latitude
+            flight._landing_ref_lon = flight.longitude
+            flight._landing_ref_elev = flight.altitude_m
 
     def _finalize_landing(self, slug: str, flight: FlightState) -> None:
         """Mark a landing as final (no touch & go possible any more)."""
@@ -904,6 +1524,8 @@ class FlightStateMachine:
         flight.landing_method = ""
         flight.landing_confidence = 0.0
         flight.landing_final = False
+        flight.landing_type = ""
+        flight.landing_airfield = ""
         flight._restart_fast_since_ts = 0.0
         flight._restart_fast_count = 0
         flight.reset_speed_window()
@@ -932,6 +1554,8 @@ class FlightStateMachine:
         flight.landing_method = ""
         flight.landing_confidence = 0.0
         flight.landing_final = False
+        flight.landing_type = ""
+        flight.landing_airfield = ""
         flight._restart_fast_since_ts = 0.0
         flight._restart_fast_count = 0
         flight.reset_speed_window()

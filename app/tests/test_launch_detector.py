@@ -141,6 +141,28 @@ def test_aerotow_pairs_without_any_role_information():
     assert tow.release_alt_agl_m == 0
 
 
+def test_visitor_is_never_paired_as_tow_plane():
+    """A tow plane that did not start here (visitor) flying in formation
+    with a home glider is not its tow plane."""
+    sim = _sim(roles={TOW: "towplane", GLD: "glider"})
+    # TOW enters the visitor zone airborne (two confirmation beacons)
+    sim.feed(beacon(TOW, 0, east=5000, alt=AF_ELEV + 300, speed=100))
+    tow = sim.feed(beacon(TOW, 3, east=4900, alt=AF_ELEV + 300, speed=100))
+    assert tow is not None and tow.is_visitor
+    # The glider takes off at home and TOW flies 50 m ahead of it all the way
+    sim.feed_all(ground_roll(GLD))
+    sim.feed_all(_interleave(pair_climb(TOW, 18, 50, east_offset=50),
+                             pair_climb(GLD, 18, 50)))
+    glider = sim.flight(GLD)
+    assert glider.tow_plane_flarm_id == ""
+    assert glider.launch_type != "aerotow"
+    assert sim.flight(TOW).is_visitor and sim.flight(TOW).launch_type == "unknown"
+    # Control: the same formation with TOW started at home is an aerotow
+    ctrl = _sim(roles={TOW: "towplane", GLD: "glider"})
+    glider, _, _ = _tow_and_glider_to_release(ctrl)
+    assert glider.launch_type == "aerotow" and glider.tow_plane_flarm_id == TOW
+
+
 def _roleless_pair_to_separation(sim: Sim, n_climb: int = 50):
     sim.feed_all(_interleave(ground_roll(TOW), ground_roll(GLD)))
     sim.feed_all(_interleave(pair_climb(TOW, 18, n_climb, east_offset=50),

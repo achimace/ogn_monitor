@@ -291,6 +291,32 @@ Hinweise:
 - Copernicus ist ein Oberflächenmodell (DSM): über Wald liegt der Wert
   ≈20-30 m über dem Boden, am Flugplatz stimmt er.
 
+## 9b. Flugplatz-Datenbank (fremde Plätze, Besucher)
+
+Der Worker unterscheidet Landungen auf einem bekannten fremden Flugplatz
+(normale Landung mit Platzname) von Außenlandungen und erkennt Besucher, die
+an einem bekannten Platz gestartet sind. Quelle: OurAirports (public domain,
+`airports.csv`), Tabelle `airports` (Migration 011, läuft mit `deploy.sh`).
+
+Einmalig nach dem Deploy (und erneut, wenn ein Flugplatz hinzukommt oder
+einmal im Jahr für neue Plätze):
+
+```bash
+cd /opt/ogn_monitor
+docker compose run --rm --no-deps api python -m app.tools.import_airports
+# Standard: alle Plätze im Umkreis 300 km um jeden aktiven Flugplatz
+# (--radius-km ändert das, --all-world importiert weltweit ≈ 45.000 Zeilen)
+
+# Kontrolle: nächster Platz zu einem Punkt (Unterwössen ≈ 0 m)
+docker compose run --rm --no-deps api python -m app.tools.import_airports --check 47.7297 12.4382
+```
+
+Der Import ist ein Upsert nach `ident` (nichts wird gelöscht); der Worker
+lädt die Plätze beim Start und bei jedem Config-Reload (alle 5 min), ein
+Neustart ist nicht nötig (Log `airport_index_loaded` mit Anzahl). Ohne
+Import bleibt es beim alten Verhalten: jede Landung außerhalb ist eine
+Außenlandung, Besucher werden nur mit Startort „unbekannt“ erkannt.
+
 ## 10. Wartung & Monitoring
 
 ### Logs anschauen

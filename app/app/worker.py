@@ -61,7 +61,7 @@ async def load_airfield_configs() -> dict:
 
     db = get_db()
     rows = await db.fetch(
-        "SELECT id, slug, latitude, longitude, elevation_m, "
+        "SELECT id, slug, name, latitude, longitude, elevation_m, "
         "home_radius_m, ogn_filter_radius_km, alarm_timeout_s, "
         "signal_loss_timeout_s, takeoff_speed_kmh, takeoff_alt_offset_m, "
         "tow_plane_flarm_ids, winch_vs_threshold_ms, "
@@ -90,6 +90,7 @@ async def load_airfield_configs() -> dict:
         configs[slug] = AirfieldConfig(
             id=row["id"],
             slug=slug,
+            name=row["name"] or slug,
             latitude=row["latitude"],
             longitude=row["longitude"],
             elevation_m=row["elevation_m"],
@@ -106,6 +107,10 @@ async def load_airfield_configs() -> dict:
             sticky_landed_max_age_s=(row["landed_visible_minutes"] or 1440) * 60,
             touch_go_max_ground_s=row["touch_go_max_ground_s"] or 90,
             silence_landing_s=row["silence_landing_s"] or 180,
+            foreign_airfield_radius_m=settings.foreign_airfield_radius_m,
+            visitor_zone_km=settings.visitor_zone_km,
+            visitor_max_agl_m=settings.visitor_max_agl_m,
+            foreign_ground_max_entries=settings.foreign_ground_max_entries,
         )
 
     log.info("airfield_configs_loaded", count=len(configs))
@@ -142,6 +147,7 @@ async def main():
         from app.aprs.filter_builder import AirfieldPosition, build_filters
         from app.data.aircraft_resolver import AircraftResolver
         from app.data.ddb_updater import scheduled_sync, sync_ddb
+        from app.tracking.airports import AirportIndex
         from app.tracking.elevation import ElevationService
         from app.tracking.flight_tracker import FlightTracker
         from app.tracking.redis_writer import RedisWriter
@@ -153,7 +159,12 @@ async def main():
         # Terrain model (elevation_tiles) for AGL; falls back to the
         # airfield elevation while the cache is cold or no tile exists.
         elevation = ElevationService(get_db())
-        flight_tracker = FlightTracker(redis_writer, aircraft_resolver, elevation=elevation)
+        # Known airports around the airfields (foreign landings, visitors);
+        # empty until `python -m app.tools.import_airports` has run.
+        airports = AirportIndex(get_db())
+        flight_tracker = FlightTracker(
+            redis_writer, aircraft_resolver, elevation=elevation, airports=airports
+        )
         state_sync = StateSynchronizer()
         if not settings.terrain_agl_enabled:
             log.info("terrain_agl_disabled", hint="TERRAIN_AGL_ENABLED=false")
@@ -164,6 +175,10 @@ async def main():
 
         if not configs:
             log.warning("No active airfields configured - worker will idle")
+
+        # Airport index around the airfields (one query per airfield; a
+        # missing table / DB error just leaves it empty = legacy behaviour)
+        await airports.load_for_airfields(configs)
 
         # Load aircraft cache
         await aircraft_resolver.load()
@@ -296,6 +311,8 @@ async def main():
                     # (already warmed centres are skipped by the service)
                     if settings.terrain_agl_enabled:
                         spawn_warmup(new_configs)
+                    # Airports around new airfields / freshly imported rows
+                    await airports.load_for_airfields(new_configs)
 
                     # Rebuild APRS filters if airfields changed
                     new_filter_airfields = [

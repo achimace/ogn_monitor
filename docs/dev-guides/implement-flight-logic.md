@@ -115,6 +115,106 @@ Regeln:
 - Tests: `app/tests/test_elevation.py`, `test_flight_state_machine.py`
   (`test_terrain_*`), `test_flight_tracker.py` (`test_terrain_*`).
 
+## Fremde Flugplaetze / Besucher
+
+Quelle: Tabelle `airports` (OurAirports, Migration 011, Import
+`python -m app.tools.import_airports`, DEPLOYMENT.md 9b). Der Worker haelt
+alle Flugplaetze im Umkreis `airports_index_radius_km` (300 km) um jeden
+aktiven Platz im Speicher (`tracking/airports.py`, `AirportIndex`, 0,1-Grad-
+Raster, `nearest(lat, lon, max_m)`), laedt sie beim Start und bei jedem
+Config-Reload. **Leerer Index = Verhalten wie frueher** (jede Landung
+ausserhalb = Aussenlandung, keine Besucher). Verdrahtung wie das
+Gelaendemodell: `worker.py` -> `FlightTracker(airports=...)` ->
+`FlightStateMachine.airports`.
+
+Schwellwerte (`config.py`, per `AirfieldConfig` ueberschreibbar):
+
+| Wert | Default | Bedeutung |
+|---|---|---|
+| `foreign_airfield_radius_m` | 2000 | langsam + tief innerhalb dieser Distanz zu einem bekannten Platz = "an diesem Platz" |
+| `visitor_zone_km` | 15 | fliegende Fremde innerhalb dieser Distanz zum Heimatplatz werden als Besucher verfolgt |
+| `visitor_max_agl_m` | 1500 | Besucher nur unterhalb dieser Hoehe ueber Platz (Streckenflieger hoch drueber sind keine) |
+| `foreign_ground_max_entries` | 5000 | Obergrenze der Boden-/Abflug-/Kandidaten-Dicts je Platz (aelteste fliegen raus) |
+
+Regeln (alle in `FlightStateMachine`, Hot Path bleibt billig: Fremd-Beacons
+kosten eine Distanz + einen Dict-Lookup, die Platzsuche laeuft nur fuer
+*langsame* Beacons):
+
+1. **Landung an fremdem Platz (P2)**: nicht at_home, `is_slow`, Gelaende-AGL
+   < `outlanding_max_agl_m` **und** bekannter Platz im Radius, dessen Hoehe
+   im gleichen Band wie zu Hause liegt (`abs(alt - Platzhoehe) <=
+   near_ground_band_m`, ohne bekannte Platzhoehe nur der Gelaende-AGL-Check)
+   -> gleiche Hysterese wie zu Hause, dann `_land(..., airport=...)`:
+   `landing_type = "foreign"`, `landing_airfield = "Name (ICAO)"`, Event
+   `landing` ("Landung in ..."). Kein Platz -> `OUTLANDING_PENDING` wie
+   bisher. Restart / Touch & Go am fremden Platz werden relativ zum Platz
+   beurteilt (`_landing_ref_*`), der Folgeflug startet dort
+   (`takeoff_airfield`). Eine noch nicht finale Fremdlandung wird
+   zurueckgenommen (`landing_retracted`, Log `foreign_landing_retracted`),
+   wenn das Flugzeug **abseits** des Platzes (nicht `at_ref`) wieder klar
+   in der Luft ist (Gelaende-AGL > `outlanding_recover_agl_m`, schnell) -
+   ein tiefer langsamer Vorbeiflug ist keine Landung. Heimatlandungen
+   setzen `landing_type = "home"`, `landing_airfield = <Platzname>`;
+   Aussenlandungen `"outlanding"` / `""`. `LANDABLE_STATUSES` enthaelt
+   auch `OUTLANDING_PENDING`: ein Verdachtsfall, der ins Heimat-Polygon
+   rollt, landet zu Hause.
+2. **Rueckkehr nach Aussenlandung (P1)**: aus `OUTLANDING`/`DIVERTED` gibt es
+   zwei Wege. (a) Ist das Flugzeug auf `OUTLANDING_RECOVER_MIN_BEACONS` (2)
+   aufeinanderfolgenden Beacons wieder klar in der Luft (Rohgeschwindigkeit
+   >= Startgeschwindigkeit, Gelaende-AGL > `outlanding_recover_agl_m`), wird
+   der Aussenlande-Flug wie beim Restart eines gelandeten Flugs mit
+   `flight_restarted` archiviert (Landezeit = Beginn des Verdachts,
+   `landing_type = "outlanding"`) und ein **neuer** Flug gestartet
+   (`takeoff` mit `takeoff_airfield` = naechster Platz oder `"Feld"`,
+   Startzeit = erster Luft-Beacon). (b) Taucht es langsam am Boden zu Hause
+   auf (Ruecktransport, Funkloch auf dem Rueckweg), wird der Aussenlande-Flug
+   mit **`outlanding_returned`** archiviert (Tracker: flight_log + Entfernen
+   aus dem Hot State, WS `flight_removed`) und das Flugzeug **vergessen** -
+   es ist ab diesem Beacon ein normaler Bodenkontakt am Heimatplatz, ein
+   spaeterer echter Start ist ein normaler Heimatflug. Es wird **nie** ein
+   Flug ohne Startzeit erfunden. Ein sitzendes Flugzeug bleibt `OUTLANDING`.
+3. **Besucher (P3)**: fuer *nicht* verfolgte Flugzeuge ausserhalb des
+   Heimatbereichs gilt am naechsten bekannten Platz dieselbe Boden-/Start-
+   logik wie zu Hause (Referenz = Platzhoehe, `_foreign_ground`); ein
+   bestaetigter Start landet in `_foreign_departures` (12 h). Noch kein
+   FlightState. Ist ein unverfolgtes Flugzeug in der Luft innerhalb
+   `visitor_zone_km` (Startgeschwindigkeit, `ground_max_agl_m` < AGL <=
+   `visitor_max_agl_m`, `takeoff_min_fast_beacons` Beacons in Folge), entsteht
+   ein FlightState `FLYING` mit `is_visitor = True`, `takeoff_airfield` /
+   `takeoff_time` aus dem Abflug (sonst `"unbekannt"` / leer),
+   `visitor_since`, Event **`visitor_arrived`** ("Besucher aus ...";
+   API/WS liefern es als `flight_added`). `visitor_zone_km = 0` schaltet
+   die Besucher-Erkennung ab. Keine Startart-Erkennung, und ein Besucher
+   wird nie als Schleppflugzeug eines Heimatfluges gepaart. Der Besucher
+   landet zu Hause wie jeder andere (`landing_type = "home"`, Flugbuch mit
+   `takeoff_airfield`, `is_visitor`). **Besucher erreichen nie die
+   Aussenlande-/Alarm-Pfade** (`OUTLANDING_PENDING`, `OUTLANDING`,
+   `SIGNAL_LOST`, `ALARM`): verlaesst er die Zone wieder (Faktor 1,2),
+   verstummt er vor der Landung, geht er abseits eines Platzes langsam und
+   tief runter oder landet er an einem *anderen* Platz in der Zone, wird er
+   ohne Alarm entfernt (Event **`visitor_left`** mit Grund `left_zone` /
+   `signal_lost` / `outlanding` / `landed_elsewhere` -> `flight_removed`;
+   Tracker loescht Hash, Track-Stream und `flight_status`-Zeile, kein
+   Flugbuch-Eintrag).
+4. Ein Flugzeug gehoert zu genau einem Platz: `FlightTracker.process_line`
+   bietet verfolgte Flugzeuge nur ihrem Platz an, damit ein Flug von Platz
+   B nicht Besucher von Platz A wird.
+5. Persistenz: `FlightState.takeoff_airfield / landing_airfield /
+   landing_type / is_visitor / visitor_since` im Redis-Hash und in
+   `flight_status` / `flight_log` (Synchronizer, parametrisiert).
+   `flight_log.takeoff_time` ist NOT NULL: **nur** Besucher ohne bekannten
+   Start werden ab `visitor_since` (Notnagel: Landezeit) gebucht. Jeder
+   andere Flug hat eine Startzeit; ein Nicht-Besucher ohne Startzeit wird
+   nicht geschrieben (Log `flight_archive_skipped_no_takeoff_time`), damit
+   nie eine Zeile mit Start == Landung entsteht.
+6. VF-Sync (`vfsync/coordinator.py`) ignoriert Events ohne `takeoff_time`
+   (kein Uhr-Fallback, kein Anhaengen an eine andere offene Session) und
+   alle Events mit `is_visitor = "1"` (Log `vfsync_visitor_ignored`).
+
+Tests: `app/tests/test_foreign_airfields.py` (State Machine + Tracker),
+`test_airports.py`, `test_import_airports.py`, `test_state_synchronizer.py`,
+`api/test_flight_log_api.py`.
+
 ## F-Schlepp Paar-Erkennung (3 Kriterien!)
 1. Distanz < 150m (Seil-Laenge)
 2. Hoehendifferenz < 80m

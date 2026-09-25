@@ -30,6 +30,7 @@ import structlog
 from app.aprs.beacon_parser import Beacon, parse_beacon
 from app.config import settings
 from app.data.aircraft_resolver import AircraftResolver
+from app.tracking.airports import AirportIndex
 from app.tracking.elevation import ElevationService
 from app.tracking.flight_profile_analyzer import FlightEndClassification, analyze_profile
 from app.tracking.flight_profile_buffer import FlightProfileBuffer
@@ -61,12 +62,17 @@ class FlightTracker:
         redis_writer: RedisWriter,
         aircraft_resolver: AircraftResolver,
         elevation: ElevationService | None = None,
+        airports: AirportIndex | None = None,
     ):
         self.redis_writer = redis_writer
         self.aircraft_resolver = aircraft_resolver
         # Terrain model lookup; None = airfield elevation everywhere
         self.elevation = elevation
+        # Known airports (foreign landings, visitors); None / empty =
+        # every landing away from home is an outlanding, no visitors
+        self.airports = airports
         self.state_machine = FlightStateMachine()
+        self.state_machine.airports = airports
         self.launch_detector = LaunchDetector()
         self.profile_buffer = FlightProfileBuffer()
         # Lazy import to avoid hard coupling at module load time
@@ -108,14 +114,19 @@ class FlightTracker:
             await self._drop_untracked_beacon(beacon)
             return
 
-        # Stage 2: Try each airfield config
+        # Stage 2: a flight belongs to at most one airfield. An aircraft
+        # already tracked somewhere is only offered to that airfield (also
+        # when its beacon is dropped as out of order) - never to another
+        # one, where it could otherwise be picked up as a "visitor".
         for slug, config in self._configs.items():
-            tracked_here = self.state_machine.get_flight(slug, beacon.flarm_id) is not None
+            if self.state_machine.get_flight(slug, beacon.flarm_id) is not None:
+                await self._process_beacon_for_airfield(beacon, config)
+                return
+
+        # Untracked: takeoff at home / foreign ground contact / visitor
+        for slug, config in self._configs.items():
             flight = await self._process_beacon_for_airfield(beacon, config)
-            if flight or tracked_here:
-                # A flight belongs to at most one airfield - also when its
-                # beacon was dropped (out of order), never offer it to the
-                # next airfield.
+            if flight:
                 break
 
     async def _process_beacon_for_airfield(
@@ -135,7 +146,6 @@ class FlightTracker:
 
         # Check if we're already tracking this flight at this airfield
         existing = self.state_machine.get_flight(slug, beacon.flarm_id)
-        old_status = existing.status if existing else None
 
         # Terrain under the aircraft (async, before the CPU-bound call);
         # only for tracked flights, see the module docstring.
@@ -146,6 +156,10 @@ class FlightTracker:
         # Run through state machine
         flight = self.state_machine.process_beacon(beacon, config, terrain_m=terrain_m)
         if not flight:
+            # A dropped beacon may still have produced an event (visitor
+            # left the zone -> flight removed): publish it now.
+            if existing is not None:
+                await self._dispatch_events()
             return None
 
         # Enrich with aircraft info
@@ -176,15 +190,22 @@ class FlightTracker:
         # glider it is towing.
         new_status = flight.status
         airfield_flights = list(self.state_machine.get_all_flights(slug).values())
-        is_new_takeoff = (
-            new_status == FlightStatus.TAKEOFF
-            and (old_status is None or old_status == FlightStatus.LANDING)
-        )
-        if is_new_takeoff:
-            if old_status == FlightStatus.LANDING:
+        # A new FlightState object = new flight: first takeoff, restart
+        # after a (home / foreign) landing or an outlanding, or a visitor.
+        # A restart away from home is already FLYING on this beacon, so
+        # the object identity is the reliable signal, not the status.
+        is_new_flight = existing is None or flight is not existing
+        if is_new_flight:
+            if existing is not None:
                 # Restart: drop the detection state of the archived flight
                 self.launch_detector.cleanup(beacon.flarm_id)
-            self.launch_detector.on_takeoff(flight, airfield_flights, config)
+            # Launch detection is home-runway based (winch profile, tow
+            # pairing, release AGL): only for takeoffs at home. Flights
+            # starting at a foreign airport / in the field and visitors
+            # keep 'unknown'.
+            if (new_status == FlightStatus.TAKEOFF
+                    and flight.takeoff_airfield == config.display_name):
+                self.launch_detector.on_takeoff(flight, airfield_flights, config)
         self.launch_detector.on_beacon(flight, beacon, airfield_flights, config)
 
         # Write to Redis. Landed flights get an extended TTL so that the
@@ -351,6 +372,22 @@ class FlightTracker:
             # Sticky landed cleanup after 24h: archive AND remove from
             # the hot state.
             elif etype == "sticky_landed_expired":
+                await self._archive_to_log(old_flight)
+                await self._archive_flight(slug, old_flight)
+
+            # Visitor that never landed here (left the zone / fell
+            # silent / went down elsewhere): remove from the hot state
+            # including its track and flight_status row (same as the DDB
+            # eviction path), no flight_log row.
+            elif etype == "visitor_left":
+                await self._archive_flight(slug, old_flight)
+                await self.redis_writer.delete_track(slug, fid)
+                await self._delete_flight_status(old_flight)
+
+            # Outlanded aircraft back on the ground at home without an
+            # airborne beacon in between: the outlanding flight is over
+            # (flight_log) and the aircraft is untracked again.
+            elif etype == "outlanding_returned":
                 await self._archive_to_log(old_flight)
                 await self._archive_flight(slug, old_flight)
 

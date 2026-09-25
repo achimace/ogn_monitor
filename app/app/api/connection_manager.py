@@ -127,11 +127,17 @@ class MonitorConnectionManager:
         message_text = event.get("message", "")
 
         # Build appropriate WebSocket message
-        if event_type == "takeoff":
+        if event_type in ("takeoff", "visitor_arrived"):
+            # visitor_arrived: an aircraft that did not start here entered
+            # the visitor zone (isVisitor, takeoffAirfield, takeoffTime
+            # possibly empty) - a new entry, like a takeoff.
             ws_msg = {
                 "type": "flight_added",
                 "flight": _to_camel_case(flight_data),
             }
+            if event_type == "visitor_arrived":
+                ws_msg["eventType"] = event_type
+                ws_msg["message"] = message_text
         elif event_type == "landing":
             # Sticky landed: the flight stays in the hot state and only
             # transitions to status LANDING. Push a regular update so the
@@ -144,7 +150,8 @@ class MonitorConnectionManager:
                 "ts": _utcnow_iso(),
                 "d": _to_camel_case(flight_data),
             }
-        elif event_type in ("sticky_landed_expired", "flight_restarted"):
+        elif event_type in ("sticky_landed_expired", "flight_restarted", "visitor_left",
+                            "outlanding_returned"):
             ws_msg = {
                 "type": "flight_removed",
                 "flarmId": flarm_id,
@@ -197,7 +204,7 @@ class MonitorConnectionManager:
                 disconnected.append(ws)
 
         # Update client state on flight_added
-        if event_type == "takeoff" and flight_data:
+        if event_type in ("takeoff", "visitor_arrived") and flight_data:
             for ws in conns:
                 ws_id = id(ws)
                 if ws_id in self._client_state:
@@ -212,7 +219,8 @@ class MonitorConnectionManager:
                     self._client_state[ws_id][flarm_id] = dict(flight_data)
 
         # Remove flight from client state on real removal events
-        if event_type in ("dismissed", "sticky_landed_expired", "flight_restarted"):
+        if event_type in ("dismissed", "sticky_landed_expired", "flight_restarted",
+                          "visitor_left", "outlanding_returned"):
             for ws in conns:
                 ws_id = id(ws)
                 if ws_id in self._client_state:

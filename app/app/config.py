@@ -111,6 +111,29 @@ class Settings(BaseSettings):
     terrain_dem_base_url: str = "https://copernicus-dem-90m.s3.amazonaws.com"
     terrain_import_radius_km: int = 60
 
+    # Foreign airfields / visitors (table airports, migration 011; import:
+    # python -m app.tools.import_airports). See
+    # docs/dev-guides/implement-flight-logic.md "Fremde Flugplaetze / Besucher".
+    # Radius around every active airfield whose airports the worker keeps in
+    # memory (AirportIndex); also the import tool's default radius.
+    airports_index_radius_km: int = 300
+    airports_csv_url: str = "https://davidmegginson.github.io/ourairports-data/airports.csv"
+    # An aircraft slow and low within this distance of a known airport is
+    # "at that airport": landing there is a normal landing (landing_type
+    # 'foreign'), not an outlanding; ground contact there is remembered so
+    # a later takeoff yields takeoff_airfield / takeoff_time for visitors.
+    foreign_airfield_radius_m: int = 2000
+    # Aircraft airborne within this distance of home that did not start
+    # there are tracked as visitors (is_visitor) so their landing at home
+    # is visible; visitors leaving the zone again are dropped silently.
+    visitor_zone_km: int = 15
+    # Visitors are only picked up below this height above the airfield
+    # (cross-country traffic passing high overhead is not a visitor).
+    visitor_max_agl_m: int = 1500
+    # Upper bound of the per-airfield foreign ground / departure /
+    # visitor-candidate dicts (oldest entries are evicted).
+    foreign_ground_max_entries: int = 5000
+
     # VF-Sync worker (python -m app.vfsync), see docs/konzept-vf-sync.md Kap. 7
     vfsync_enabled: bool = False
     vfsync_cred_key: str = ""            # Fernet key (base64) for vf_sync_config credentials
