@@ -31,5 +31,13 @@
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.70.1",
     "vite": "^6.0.5"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "4.63.5",
+    "@rollup/rollup-darwin-x64": "4.63.5",
+    "@rollup/rollup-linux-arm64-musl": "4.63.5",
+    "@rollup/rollup-linux-x64-musl": "4.63.5",
+    "@rollup/rollup-linux-arm64-gnu": "4.63.5",
+    "@rollup/rollup-linux-x64-gnu": "4.63.5"
   }
 }
