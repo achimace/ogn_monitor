@@ -659,14 +659,20 @@ function createMarkerElement(trackDeg: number, color: string, label: string, isA
  * DDB / tenant forms cannot inject markup.
  */
 function buildMarkerDom(el: HTMLElement): { labelEl: HTMLDivElement; arrowEl: HTMLDivElement } {
+  // The wrapper is exactly the arrow's box (12x16 px) and nothing else, so
+  // MapLibre's anchor:'center' puts the aircraft symbol on the coordinate.
+  // The label hangs above it with absolute positioning and therefore does
+  // not shift the anchor. (Before, the label+arrow column was centred on
+  // the coordinate and additionally translated by -50%/-50%: a fixed pixel
+  // offset that became a growing geographic error when zooming out.)
   const wrapper = document.createElement('div')
-  wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)'
+  wrapper.style.cssText = 'position:relative;width:12px;height:16px'
 
   const labelEl = document.createElement('div')
-  labelEl.style.cssText = 'color:white;padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold;margin-bottom:2px'
+  labelEl.style.cssText = 'position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:2px;color:white;padding:1px 4px;border-radius:3px;white-space:nowrap;font-weight:bold'
 
   const arrowEl = document.createElement('div')
-  arrowEl.style.cssText = 'width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;filter:drop-shadow(0 0 2px rgba(0,0,0,0.5))'
+  arrowEl.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;transform-origin:50% 50%;filter:drop-shadow(0 0 2px rgba(0,0,0,0.5))'
 
   wrapper.appendChild(labelEl)
   wrapper.appendChild(arrowEl)
@@ -698,22 +704,24 @@ function updateMarkerElement(el: HTMLElement, trackDeg: number, color: string, l
 function addAirfieldMarker(map: maplibregl.Map, lat: number, lng: number, name: string) {
   const el = document.createElement('div')
 
+  // Same anchoring rule as the aircraft markers: the wrapper is the dot's
+  // box, the label floats above it, anchor 'center' = dot on the coordinate.
   const wrapper = document.createElement('div')
-  wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center'
+  wrapper.style.cssText = 'position:relative;width:12px;height:12px'
 
   const labelEl = document.createElement('div')
-  labelEl.style.cssText = 'font-size:11px;color:#fff;background:#1e40af;padding:2px 6px;border-radius:4px;font-weight:bold;margin-bottom:4px'
+  labelEl.style.cssText = 'position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:4px;font-size:11px;color:#fff;background:#1e40af;padding:2px 6px;border-radius:4px;font-weight:bold;white-space:nowrap'
   // Tenant-provided airfield name: textContent only, never markup.
   labelEl.textContent = name || 'HOME'
 
   const dotEl = document.createElement('div')
-  dotEl.style.cssText = 'width:12px;height:12px;background:#1e40af;border:2px solid white;border-radius:50%'
+  dotEl.style.cssText = 'position:absolute;left:0;top:0;width:12px;height:12px;box-sizing:border-box;background:#1e40af;border:2px solid white;border-radius:50%'
 
   wrapper.appendChild(labelEl)
   wrapper.appendChild(dotEl)
   el.appendChild(wrapper)
 
-  new maplibregl.Marker({ element: el, anchor: 'bottom' })
+  new maplibregl.Marker({ element: el, anchor: 'center' })
     .setLngLat([lng, lat])
     .addTo(map)
 }
