@@ -5,8 +5,14 @@
  * Connects via WebSocket for real-time delta updates.
  *
  * Views: Table | Map | Split (table left, map right)
+ *
+ * The view can be preset in the URL, e.g. for a tower PC that opens the
+ * monitor automatically in the morning:
+ *   /monitor/<slug>?view=table | map | split
+ * (German aliases tabelle / karte accepted). Switching the view updates the
+ * parameter, so the current address can be copied as a start link.
  */
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useTodayPoll } from '../hooks/useTodayPoll'
 import { useMonitorStore } from '../store/monitorStore'
@@ -20,6 +26,17 @@ import { useEffect, useState } from 'react'
 
 type ViewMode = 'table' | 'map' | 'split'
 
+/** URL value of ?view= -> view mode (unknown / missing -> table). */
+const VIEW_PARAM: Record<string, ViewMode> = {
+  table: 'table', tabelle: 'table',
+  map: 'map', karte: 'map',
+  split: 'split',
+}
+
+function viewFromParam(value: string | null): ViewMode {
+  return VIEW_PARAM[(value || '').trim().toLowerCase()] ?? 'table'
+}
+
 export default function MonitorPage() {
   const { slug } = useParams<{ slug: string }>()
   const getCombinedFlights = useMonitorStore((s) => s.getCombinedFlights)
@@ -31,7 +48,8 @@ export default function MonitorPage() {
   useMonitorStore((s) => s.archivedToday)
   const setSlug = useMonitorStore((s) => s.setSlug)
   const [clock, setClock] = useState(utcNow())
-  const [view, setView] = useState<ViewMode>('table')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [view, setView] = useState<ViewMode>(() => viewFromParam(searchParams.get('view')))
   const [selectedFlight, setSelectedFlight] = useState<Flight | null>(null)
   // Map/split view: aircraft the map is centered on (row click in split view,
   // marker click in both). null = overview.
@@ -62,6 +80,12 @@ export default function MonitorPage() {
 
   function switchView(mode: ViewMode) {
     setView(mode)
+    // Keep ?view= in sync (replace: no history entry per click)
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.set('view', mode)
+      return next
+    }, { replace: true })
     // The map is re-mounted on a layout change; start it in overview mode.
     setFocusFlarmId(null)
   }
