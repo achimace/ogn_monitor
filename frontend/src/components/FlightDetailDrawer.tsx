@@ -233,7 +233,10 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
             >
               {dismissing ? 'Wird entfernt...' : 'Aus Liste entfernen'}
             </button>
-            <p className="text-[10px] leading-tight text-gray-600 text-center whitespace-nowrap overflow-hidden text-ellipsis">
+            <p
+              title="Archiviert ins Flugbuch und blendet bei allen Monitoren aus."
+              className="text-[10px] leading-tight text-gray-600 text-center whitespace-nowrap overflow-hidden text-ellipsis"
+            >
               Archiviert ins Flugbuch und blendet bei allen Monitoren aus.
             </p>
 
