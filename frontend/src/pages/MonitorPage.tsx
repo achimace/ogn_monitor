@@ -146,6 +146,7 @@ export default function MonitorPage() {
                 onDetails={setSelectedFlight}
                 focusedFlarmId={focusFlarmId ?? undefined}
                 stripFields={stripFields}
+                dense
               />
             </div>
             <div className="w-1/2">
