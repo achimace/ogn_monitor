@@ -426,8 +426,24 @@ export default function AirfieldConfigPage() {
             <label className="text-sm text-gray-300">Flugplatz aktiv (empfaengt OGN-Daten)</label>
           </div>
 
-          {/* Actions */}
-          <div className="flex items-center gap-3 pt-2">
+          {/* Delete airfield (destructive, scrolls with the content) */}
+          {form.id && (
+            <div>
+              <button
+                type="button"
+                onClick={handleDelete}
+                className="bg-red-900/40 hover:bg-red-800/60 border border-red-500 text-red-300 font-semibold rounded-lg px-4 py-2.5 transition-colors"
+              >
+                Flugplatz loeschen
+              </button>
+              <p className="text-xs text-gray-500 mt-1">
+                Loescht den Flugplatz und alle zugehoerigen Daten unwiderruflich.
+              </p>
+            </div>
+          )}
+
+          {/* Actions – sticky at the bottom of the scrollable main area */}
+          <div className="sticky bottom-0 z-10 -mx-6 -mb-6 px-6 py-4 bg-tower-bg border-t border-tower-border rounded-b-xl flex items-center gap-3">
             <button
               type="submit"
               disabled={saving}
@@ -435,15 +451,6 @@ export default function AirfieldConfigPage() {
             >
               {saving ? 'Wird gespeichert...' : form.id ? 'Speichern' : 'Erstellen'}
             </button>
-            {form.id && (
-              <button
-                type="button"
-                onClick={handleDelete}
-                className="text-gray-500 hover:text-red-400 text-sm transition-colors"
-              >
-                Flugplatz loeschen
-              </button>
-            )}
           </div>
         </form>
       </div>

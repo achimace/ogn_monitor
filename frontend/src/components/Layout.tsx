@@ -24,15 +24,15 @@ export default function Layout() {
   }
 
   return (
-    <div className="min-h-screen flex">
-      {/* Sidebar */}
+    <div className="h-screen overflow-hidden flex">
+      {/* Sidebar (fixed, full viewport height – only <main> scrolls) */}
       <aside className="w-56 bg-tower-surface border-r border-tower-border flex flex-col">
         <div className="p-4 border-b border-tower-border">
           <h1 className="text-lg font-bold text-white">FlightMonitor</h1>
           <p className="text-xs text-gray-500 mt-1">{user?.tenantName || 'Laden...'}</p>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex-1 overflow-y-auto p-3 space-y-1">
           {NAV_ITEMS.map((item) => {
             const active = location.pathname === item.path
             return (
@@ -79,7 +79,7 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
     </div>
