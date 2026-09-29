@@ -60,8 +60,7 @@ export default function FlightTable({ flights, onSelect, onFocus, onDetails, foc
   // regardless of which status the backend attached to it.
   const outlanding = sorted.filter((f) =>
     ['outlanding', 'outlanding_pending', 'diverted'].includes(f.status) && !isForeignLanding(f))
-  const landed = sorted.filter((f) =>
-    ['landing', 'ground'].includes(f.status) || isForeignLanding(f))
+  const landed = sorted.filter(isLandedStrip)
 
   return (
     <div className="space-y-3">
@@ -151,6 +150,14 @@ function FlightRow({ flight, bgColor, handlers, show }: {
   const launchLabel = formatLaunchType(flight.launchType)
   const elapsedMin = flight.elapsedS > 0 ? Math.floor(flight.elapsedS / 60) : undefined
 
+  // Landed strips ("GELANDET" section) drop the stale live data (QDR,
+  // distance, altitude, climb, speed/track) and show takeoff/landing
+  // airfield instead. Fallbacks match FlightDetailDrawer.
+  const landedStrip = isLandedStrip(flight)
+  const takeoffField = flight.takeoffAirfield || 'unbekannt'
+  const isOutlanded = flight.landingType === 'outlanding'
+  const landingField = flight.landingAirfield || (isOutlanded ? 'Außenlandung' : '—')
+
   // Landing at a known foreign airfield: badge stays "LDG", the field name
   // goes underneath (desktop) or into the meta line (mobile).
   const foreignLanding = isForeignLanding(flight)
@@ -206,7 +213,9 @@ function FlightRow({ flight, bgColor, handlers, show }: {
               {[
                 show('takeoff_time') && takeoffStr ? `Start ${takeoffStr}` : '',
                 show('landing_time') && landingStr ? `Landung ${landingStr}` : '',
-                foreignField ? `in ${foreignField}` : '',
+                // Landed strips show the landing field in the airfield pair
+                // below – no need to repeat it in the meta line.
+                foreignField && !landedStrip ? `in ${foreignField}` : '',
                 show('duration') && durationStr,
                 show('launch_type') && launchLabel,
                 show('aircraft_model') && flight.aircraftModel,
@@ -222,6 +231,12 @@ function FlightRow({ flight, bgColor, handlers, show }: {
             {detailsButton}
           </div>
         </div>
+        {landedStrip ? (
+          <div className="grid grid-cols-2 gap-2">
+            <AirfieldPair label="Start" value={takeoffField} />
+            <AirfieldPair label="Landung" value={landingField} outlanding={isOutlanded} />
+          </div>
+        ) : (
         <div className="grid grid-cols-3 gap-2 text-center">
           <div>
             {show('qdr') ? (
@@ -258,6 +273,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
             ) : <div />}
           </div>
         </div>
+        )}
       </div>
 
       {/* ===== Desktop row layout (>= md) ===== */}
@@ -288,7 +304,13 @@ function FlightRow({ flight, bgColor, handlers, show }: {
               <div className="text-green-400 text-sm font-mono leading-tight">↓ {landingStr}</div>
             )}
             {show('duration') && durationStr && (
-              <div className="text-gray-500 text-[10px] mt-0.5">{durationStr}</div>
+              // Landed: the flight duration is what the controller looks for –
+              // render it a touch larger and brighter than on live strips.
+              <div className={landedStrip
+                ? 'text-gray-300 text-xs font-mono mt-0.5'
+                : 'text-gray-500 text-[10px] mt-0.5'}>
+                {durationStr}
+              </div>
             )}
             {show('launch_type') && launchLabel && (
               <div className="text-gray-500 text-[10px] mt-0.5">{launchLabel}</div>
@@ -298,7 +320,15 @@ function FlightRow({ flight, bgColor, handlers, show }: {
 
         {/* Column 3: PRIMARY - QDR, Distance, Height.
             min-w-0 lets the column shrink in the half-width split pane instead
-            of pushing the status column out of the visible area. */}
+            of pushing the status column out of the visible area.
+            Landed strips: live data is stale – show takeoff/landing airfield
+            instead, in the same flex-1 slot so the row grid never jumps. */}
+        {landedStrip ? (
+          <div className="flex-1 min-w-0 flex items-center gap-4 lg:gap-8">
+            <AirfieldPair label="Start" value={takeoffField} />
+            <AirfieldPair label="Landung" value={landingField} outlanding={isOutlanded} />
+          </div>
+        ) : (
         <div className="flex-1 min-w-0 flex items-center gap-3 lg:gap-6">
           {show('qdr') && (
             <div className="text-center">
@@ -347,6 +377,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
             </div>
           )}
         </div>
+        )}
 
         {/* Column 4: Status, with the alarm-handling badge and the Details
             button (split view only) stacked underneath so the row keeps its
@@ -359,6 +390,37 @@ function FlightRow({ flight, bgColor, handlers, show }: {
       </div>
     </div>
   )
+}
+
+/**
+ * Compact label/value pair for takeoff/landing airfield on landed strips.
+ * Truncates long field names (split view!) with the full name as tooltip;
+ * outlandings are highlighted orange like the outlanding status.
+ */
+function AirfieldPair({ label, value, outlanding }: {
+  label: string; value: string; outlanding?: boolean
+}) {
+  return (
+    <div className="flex-1 min-w-0">
+      <div className="text-gray-500 text-[10px] uppercase tracking-wider">{label}</div>
+      <div
+        className={`${outlanding ? 'text-orange-400' : 'text-gray-200'} text-base font-semibold leading-tight truncate`}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Strip belongs in the "GELANDET" section and gets the landed layout
+ * (airfields instead of live data). Matches FlightDetailDrawer.isLanded
+ * for these rows – outlandings without a known foreign field live in the
+ * separate "AUSSENLANDUNG" section and keep the regular strip layout.
+ */
+function isLandedStrip(f: Flight): boolean {
+  return ['landing', 'ground'].includes(f.status) || isForeignLanding(f)
 }
 
 /**
