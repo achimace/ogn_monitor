@@ -115,6 +115,10 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
           {history.length > 0 ? (
             <div>
               <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Verlauf</div>
+              {/* A failed refetch must stay visible even when an older list is shown */}
+              {historyError && (
+                <div className="text-red-300 text-xs mb-1" role="alert">Verlauf: {historyError}</div>
+              )}
               <ul className="space-y-1 text-xs">
                 {history.map((item) => <HistoryRow key={item.id} item={item} />)}
               </ul>
