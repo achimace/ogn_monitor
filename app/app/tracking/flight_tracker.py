@@ -281,7 +281,11 @@ class FlightTracker:
             slug, beacon.flarm_id, redis_data, ttl=ttl
         )
 
-        # Publish beacon update
+        # Publish beacon update. Aircraft identity is included so the
+        # delta compression in the API's connection manager pushes a
+        # late-resolved registration (aircraft entered while the flight
+        # is live) to open monitors without a reload; unchanged values
+        # are dropped from the delta as usual.
         await self.redis_writer.publish_beacon(slug, beacon.flarm_id, {
             "latitude": round(beacon.lat, 5),
             "longitude": round(beacon.lon, 5),
@@ -295,6 +299,9 @@ class FlightTracker:
             "distance_m": round(flight.distance_m),
             "bearing_text": flight.bearing_text,
             "last_seen": flight.last_seen,
+            "registration": flight.registration,
+            "aircraft_model": flight.aircraft_model,
+            "competition_sign": flight.competition_sign,
         })
 
         # Add to position stream

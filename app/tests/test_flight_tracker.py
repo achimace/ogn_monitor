@@ -31,6 +31,7 @@ class FakeRedisWriter:
         self.events: list[tuple[str, str, str]] = []
         self.track_points: list[tuple[str, str, int]] = []
         self.beacons: list[tuple[str, str]] = []
+        self.beacon_payloads: list[tuple[str, dict]] = []
         self.positions: list[tuple[str, str]] = []
         self.deleted_tracks: list[tuple[str, str]] = []
         self.event_payloads: list[tuple[str, dict, str]] = []
@@ -40,6 +41,7 @@ class FakeRedisWriter:
 
     async def publish_beacon(self, slug, fid, data):
         self.beacons.append((slug, fid))
+        self.beacon_payloads.append((fid, dict(data)))
 
     async def add_position(self, slug, fid, *args):
         self.positions.append((slug, fid))
@@ -347,6 +349,40 @@ async def test_aprs_registration_still_used_for_device_unknown_to_ddb(tracker):
     flight = await _feed(tracker, roll)
     assert flight.registration == "D-APRS"
     assert tracker.aircraft_resolver.aprs_updates == [(GLD, "D-APRS")]
+
+
+async def test_beacon_payload_carries_aircraft_identity(tracker):
+    """publish_beacon includes registration / model / CN so the WS delta
+    compression can push them to open monitors."""
+    tracker.aircraft_resolver.infos[GLD] = _info(
+        GLD, registration="D-1234", competition_sign="WX", source="tenant")
+
+    await _feed(tracker, ground_roll(GLD))
+
+    fid, data = tracker.redis_writer.beacon_payloads[-1]
+    assert fid == GLD
+    assert data["registration"] == "D-1234"
+    assert data["aircraft_model"] == "ASK 21"
+    assert data["competition_sign"] == "WX"
+
+
+async def test_late_resolved_registration_reaches_beacon_payload(tracker):
+    """An aircraft entered while its flight is live: after the resolver
+    reload (tracker:config signal) the next beacon payload carries the
+    registration - open monitors update without a reload."""
+    await _feed(tracker, ground_roll(GLD))
+    _, before = tracker.redis_writer.beacon_payloads[-1]
+    assert before["registration"] == "" and before["competition_sign"] == ""
+
+    # Operator adds the aircraft; the worker reloads the resolver cache
+    tracker.aircraft_resolver.infos[GLD] = _info(
+        GLD, registration="D-1234", competition_sign="WX", source="tenant")
+    await _feed(tracker, fly_away(GLD, 30))
+
+    _, after = tracker.redis_writer.beacon_payloads[-1]
+    assert after["registration"] == "D-1234"
+    assert after["aircraft_model"] == "ASK 21"
+    assert after["competition_sign"] == "WX"
 
 
 async def test_ddb_reload_flipping_tracked_evicts_flying_aircraft(tracker):
