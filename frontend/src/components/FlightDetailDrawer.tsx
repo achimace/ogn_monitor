@@ -147,23 +147,34 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
           )}
         </div>
 
-        {/* Live data grid */}
-        <div className="px-4 py-2.5 grid grid-cols-3 gap-x-4 gap-y-2 border-b border-tower-border">
-          <Stat label="QDR" value={`${flight.qdrDeg}°`} hint={flight.bearingText} color="text-white" />
-          <Stat label="Distanz" value={`${(flight.distanceM / 1000).toFixed(1)} km`} color="text-tower-distance" />
-          <Stat label="Höhe" value={`${flight.altitudeM} m`} hint={flight.altitudeAgl > 0 ? `${flight.altitudeAgl} AGL` : ''} color="text-tower-altitude" />
-          <Stat label="Speed" value={`${flight.speedKmh} km/h`} color="text-gray-200" />
-          <Stat label="Steigen" value={`${flight.verticalSpeedMs >= 0 ? '+' : ''}${flight.verticalSpeedMs.toFixed(1)} m/s`} color="text-gray-200" />
-          <Stat label="Kurs" value={`${flight.trackDeg}°`} color="text-gray-200" />
-        </div>
+        {landed ? (
+          /* Landed: live values (QDR/speed/…) are stale – show the flight
+             summary (takeoff, landing, duration) prominently instead. */
+          <div className="px-4 py-2.5 grid grid-cols-3 gap-x-4 gap-y-2 border-b border-tower-border">
+            <Stat label="Start" value={takeoff || '—'} hint={takeoff ? 'UTC' : ''} color="text-white" />
+            <Stat label="Landung" value={landing || '—'} hint={landing ? 'UTC' : ''} color="text-green-400" />
+            <Stat label="Flugzeit" value={duration || '—'} color="text-tower-qdr" />
+          </div>
+        ) : (
+          /* Live data grid */
+          <div className="px-4 py-2.5 grid grid-cols-3 gap-x-4 gap-y-2 border-b border-tower-border">
+            <Stat label="QDR" value={`${flight.qdrDeg}°`} hint={flight.bearingText} color="text-white" />
+            <Stat label="Distanz" value={`${(flight.distanceM / 1000).toFixed(1)} km`} color="text-tower-distance" />
+            <Stat label="Höhe" value={`${flight.altitudeM} m`} hint={flight.altitudeAgl > 0 ? `${flight.altitudeAgl} AGL` : ''} color="text-tower-altitude" />
+            <Stat label="Speed" value={`${flight.speedKmh} km/h`} color="text-gray-200" />
+            <Stat label="Steigen" value={`${flight.verticalSpeedMs >= 0 ? '+' : ''}${flight.verticalSpeedMs.toFixed(1)} m/s`} color="text-gray-200" />
+            <Stat label="Kurs" value={`${flight.trackDeg}°`} color="text-gray-200" />
+          </div>
+        )}
 
-        {/* Timeline: two columns to keep the drawer short even with all rows */}
+        {/* Timeline: two columns to keep the drawer short even with all rows.
+            When landed, Start/Landung/Dauer already sit in the grid above. */}
         <div className="px-4 py-2.5 grid grid-cols-2 gap-x-6 gap-y-1 text-sm border-b border-tower-border">
-          <Row label="Start" value={takeoff} />
-          {landing && <Row label="Landung" value={landing} />}
+          {!landed && <Row label="Start" value={takeoff} />}
+          {!landed && landing && <Row label="Landung" value={landing} />}
           <Row label="Startplatz" value={takeoffAirfield} mono={false} />
           {landed && <Row label="Landeplatz" value={landingAirfield} mono={false} />}
-          {duration && <Row label="Dauer" value={duration} />}
+          {!landed && duration && <Row label="Dauer" value={duration} />}
           {flight.launchType && <Row label="Startart" value={launchLabel(flight.launchType)} mono={false} />}
           {flight.maxAltitudeM > 0 && <Row label="Max. Höhe" value={`${flight.maxAltitudeM} m`} />}
           {flight.maxDistanceM > 0 && <Row label="Max. Distanz" value={`${(flight.maxDistanceM / 1000).toFixed(1)} km`} />}
