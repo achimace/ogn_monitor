@@ -103,6 +103,18 @@ interface MonitorState {
   getCombinedFlights: () => Flight[]
 }
 
+/**
+ * Numeric Flight fields that a WebSocket delta may carry. Beacon deltas
+ * send real numbers, but worker EVENT deltas (landing, launch type, ...)
+ * relay the Redis hash where every value is a string – merged unconverted
+ * they crash renderers that call e.g. verticalSpeedMs.toFixed().
+ */
+const NUMERIC_DELTA_FIELDS = new Set([
+  'qdrDeg', 'distanceM', 'altitudeM', 'altitudeAgl', 'speedKmh',
+  'verticalSpeedMs', 'trackDeg', 'latitude', 'longitude', 'elapsedS',
+  'maxAltitudeM', 'maxDistanceM', 'releaseAltM',
+])
+
 /** Coerce an unknown value to a known AlarmState (or null). */
 export function normalizeAlarmState(val: unknown): AlarmState | null {
   if (typeof val !== 'string') return null
@@ -253,6 +265,9 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
           updated.isVisitor = toBool(val)
         } else if (key === 'landingCount') {
           updated.landingCount = Number(val) || 1
+        } else if (NUMERIC_DELTA_FIELDS.has(key)) {
+          const num = Number(val)
+          ;(updated as Record<string, unknown>)[key] = Number.isNaN(num) ? 0 : num
         } else {
           (updated as Record<string, unknown>)[key] = val
         }
