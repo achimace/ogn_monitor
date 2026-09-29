@@ -114,21 +114,21 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
         className="fixed inset-0 bg-black/60 z-40"
         onClick={onClose}
       />
-      {/* Drawer */}
+      {/* Drawer: flex column so the header stays fixed and only the body scrolls */}
       <div
-        className="fixed z-50 bg-tower-surface border-tower-border text-white overflow-y-auto
-          inset-x-0 bottom-0 max-h-[85vh] rounded-t-2xl border-t
+        className="fixed z-50 bg-tower-surface border-tower-border text-white flex flex-col
+          inset-x-0 bottom-0 max-h-[85vh] supports-[height:100dvh]:max-h-[85dvh] rounded-t-2xl border-t
           md:inset-y-0 md:right-0 md:left-auto md:bottom-auto md:max-h-none md:max-w-md md:w-full md:rounded-none md:border-l md:border-t-0"
       >
         {/* Mobile drag handle */}
-        <div className="md:hidden flex justify-center pt-2 pb-1">
+        <div className="md:hidden flex justify-center pt-2 pb-1 shrink-0">
           <div className="w-10 h-1 rounded-full bg-tower-border" />
         </div>
 
-        {/* Header */}
-        <div className="px-5 py-4 border-b border-tower-border flex items-start justify-between gap-3">
+        {/* Header (stays visible while the body scrolls) */}
+        <div className="shrink-0 px-4 py-2.5 border-b border-tower-border flex items-start justify-between gap-3">
           <div>
-            <div className="text-2xl font-bold leading-tight flex items-center gap-2 flex-wrap">
+            <div className="text-xl font-bold leading-tight flex items-center gap-2 flex-wrap">
               <span>{flight.registration || flight.flarmId}</span>
               {flight.isVisitor && (
                 <span
@@ -156,8 +156,11 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
           </button>
         </div>
 
+        {/* Scrollable body */}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+
         {/* Status banner */}
-        <div className={`px-5 py-2 text-sm font-semibold uppercase tracking-wider ${statusBg(flight.status)}`}>
+        <div className={`px-4 py-1.5 text-sm font-semibold uppercase tracking-wider ${statusBg(flight.status)}`}>
           {statusLabel(flight.status)}
           {elapsedMin > 0 && flight.status !== 'landing' && (
             <span className="ml-2 font-normal">
@@ -167,7 +170,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
         </div>
 
         {/* Live data grid */}
-        <div className="px-5 py-4 grid grid-cols-3 gap-4 border-b border-tower-border">
+        <div className="px-4 py-2.5 grid grid-cols-3 gap-x-4 gap-y-2 border-b border-tower-border">
           <Stat label="QDR" value={`${flight.qdrDeg}°`} hint={flight.bearingText} color="text-white" />
           <Stat label="Distanz" value={`${(flight.distanceM / 1000).toFixed(1)} km`} color="text-tower-distance" />
           <Stat label="Höhe" value={`${flight.altitudeM} m`} hint={flight.altitudeAgl > 0 ? `${flight.altitudeAgl} AGL` : ''} color="text-tower-altitude" />
@@ -177,7 +180,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
         </div>
 
         {/* Timeline */}
-        <div className="px-5 py-4 space-y-2 text-sm border-b border-tower-border">
+        <div className="px-4 py-2.5 space-y-1 text-sm border-b border-tower-border">
           <Row label="Start" value={takeoff} />
           <Row label="Startplatz" value={takeoffAirfield} mono={false} />
           {landing && <Row label="Landung" value={landing} />}
@@ -188,23 +191,27 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
           {flight.maxDistanceM > 0 && <Row label="Max. Distanz" value={`${(flight.maxDistanceM / 1000).toFixed(1)} km`} />}
         </div>
 
-        {/* Last position */}
-        {flight.latitude !== 0 && (
-          <div className="px-5 py-4 text-sm border-b border-tower-border">
-            <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Letzte Position</div>
-            <div className="font-mono text-gray-200">
-              {flight.latitude.toFixed(5)}°N {flight.longitude.toFixed(5)}°E
+        {/* Last position + FLARM ID (one compact section) */}
+        <div className="px-4 py-2 text-xs border-b border-tower-border space-y-1">
+          {flight.latitude !== 0 && (
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-gray-500 uppercase tracking-wider shrink-0">Letzte Position</span>
+              <a
+                href={`https://www.google.com/maps?q=${flight.latitude},${flight.longitude}`}
+                target="_blank"
+                rel="noopener"
+                title="In Google Maps öffnen"
+                className="font-mono text-gray-200 hover:text-tower-qdr hover:underline text-right"
+              >
+                {flight.latitude.toFixed(5)}°N {flight.longitude.toFixed(5)}°E ↗
+              </a>
             </div>
-            <a
-              href={`https://www.google.com/maps?q=${flight.latitude},${flight.longitude}`}
-              target="_blank"
-              rel="noopener"
-              className="text-tower-qdr hover:underline text-xs inline-block mt-1"
-            >
-              In Google Maps öffnen ↗
-            </a>
+          )}
+          <div className="flex items-baseline justify-between gap-3 text-gray-600">
+            <span className="text-gray-500 uppercase tracking-wider shrink-0">FLARM-ID</span>
+            <span className="font-mono">{flight.flarmId}</span>
           </div>
-        )}
+        </div>
 
         {/* Tower alarm handling (B2): state visible to everyone, actions need a login */}
         {isAlarmHandlingRelevant(flight) && (
@@ -213,7 +220,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
 
         {/* Operations actions (only for logged-in airfield owners) */}
         {isAuthenticated && airfieldSlug && (
-          <div className="px-5 py-4 border-t border-tower-border space-y-2">
+          <div className="px-4 py-2.5 border-t border-tower-border space-y-1.5">
             {dismissError && (
               <div className="text-red-300 text-xs">{dismissError}</div>
             )}
@@ -221,12 +228,12 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
               onClick={handleDismiss}
               disabled={dismissing}
               className="w-full bg-red-900/40 hover:bg-red-900/60 border border-red-700/50
-                text-red-200 text-sm font-medium rounded-lg px-4 py-2.5
+                text-red-200 text-sm font-medium rounded-lg px-4 py-2
                 transition-colors disabled:opacity-50"
             >
               {dismissing ? 'Wird entfernt...' : 'Aus Liste entfernen'}
             </button>
-            <p className="text-[10px] text-gray-600 text-center">
+            <p className="text-[10px] leading-tight text-gray-600 text-center whitespace-nowrap overflow-hidden text-ellipsis">
               Archiviert ins Flugbuch und blendet bei allen Monitoren aus.
             </p>
 
@@ -234,7 +241,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
               <button
                 onClick={() => { setShowIgnoreForm(true); setIgnoreError('') }}
                 className="w-full bg-tower-bg hover:bg-white/10 border border-tower-border
-                  text-gray-300 text-sm font-medium rounded-lg px-4 py-2.5 transition-colors"
+                  text-gray-300 text-sm font-medium rounded-lg px-4 py-2 transition-colors"
               >
                 Nicht mehr beobachten
               </button>
@@ -282,9 +289,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
           </div>
         )}
 
-        <div className="px-5 py-4 text-xs text-gray-600">
-          FLARM-ID: <span className="font-mono">{flight.flarmId}</span>
-        </div>
+        </div>{/* /Scrollable body */}
       </div>
     </>
   )
@@ -294,7 +299,7 @@ function Stat({ label, value, hint, color }: { label: string; value: string; hin
   return (
     <div>
       <div className="text-gray-500 text-xs uppercase tracking-wider">{label}</div>
-      <div className={`font-mono font-bold text-lg leading-tight ${color}`}>{value}</div>
+      <div className={`font-mono font-bold text-base leading-tight ${color}`}>{value}</div>
       {hint && <div className="text-gray-500 text-[10px]">{hint}</div>}
     </div>
   )
