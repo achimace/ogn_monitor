@@ -31,6 +31,7 @@ interface TodayResponse {
   config?: {
     strip_fields?: string[]
     landed_visible_minutes?: number
+    show_passing_visitors?: boolean
   }
 }
 
@@ -101,7 +102,9 @@ export function useTodayPoll(slug: string | null) {
         const allowed = new Set<string>(ALL_STRIP_FIELDS)
         const stripFields = (data.config?.strip_fields || ALL_STRIP_FIELDS)
           .filter((f) => allowed.has(f)) as StripField[]
-        setTodayData(archived, stats, stripFields)
+        // Only an explicit false hides visitors (older API: shown)
+        const showPassingVisitors = data.config?.show_passing_visitors !== false
+        setTodayData(archived, stats, stripFields, showPassingVisitors)
       } catch {
         // ignore - WebSocket is the primary live source
       }

@@ -70,6 +70,8 @@ interface MonitorState {
   archivedToday: Flight[]  // archived earlier today, not in hot state
   dayStats: DayStats
   stripFields: StripField[]
+  /** Airfield setting: list airborne visitors (isVisitor, not landed here) */
+  showPassingVisitors: boolean
   stats: FlightStats
   alarms: AlarmEvent[]
   connected: boolean
@@ -81,7 +83,8 @@ interface MonitorState {
   applyDelta: (flarmId: string, delta: FlightDelta) => void
   addFlight: (flight: Flight) => void
   removeFlight: (flarmId: string) => void
-  setTodayData: (archived: Flight[], stats: DayStats, stripFields: StripField[]) => void
+  setTodayData: (archived: Flight[], stats: DayStats, stripFields: StripField[],
+                 showPassingVisitors: boolean) => void
   addAlarm: (alarm: Omit<AlarmEvent, 'acknowledged'>) => void
   acknowledgeAlarm: (flarmId: string) => void
   clearAlarm: (flarmId: string) => void
@@ -139,6 +142,7 @@ export function pickAirfieldFields(raw: Record<string, unknown>): AirfieldFields
   if ('landingAirfield' in raw) out.landingAirfield = raw.landingAirfield ? String(raw.landingAirfield) : ''
   if ('landingType' in raw) out.landingType = raw.landingType ? String(raw.landingType) : ''
   if ('isVisitor' in raw) out.isVisitor = toBool(raw.isVisitor)
+  if ('landingCount' in raw) out.landingCount = Number(raw.landingCount) || 1
   return out
 }
 
@@ -205,12 +209,16 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
   archivedToday: [],
   dayStats: EMPTY_DAY_STATS,
   stripFields: [...ALL_STRIP_FIELDS],
+  showPassingVisitors: true,
   stats: { flying: 0, landed: 0, alarm: 0, outlanding: 0 },
   alarms: [],
   connected: false,
   lastUpdate: null,
 
-  setSlug: (slug) => set({ slug }),
+  // Airfield switch: back to the defaults until /today delivers the settings
+  setSlug: (slug) => set((s) => (s.slug === slug ? { slug } : {
+    slug, stripFields: [...ALL_STRIP_FIELDS], showPassingVisitors: true,
+  })),
 
   setFullState: (rawFlights, stats) => {
     const flights = new Map<string, Flight>()
@@ -243,6 +251,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
         } else if (key === 'isVisitor') {
           // Redis flag "1"/"0" (or boolean) – keep the store boolean-only
           updated.isVisitor = toBool(val)
+        } else if (key === 'landingCount') {
+          updated.landingCount = Number(val) || 1
         } else {
           (updated as Record<string, unknown>)[key] = val
         }
@@ -316,8 +326,8 @@ export const useMonitorStore = create<MonitorState>((set, get) => ({
     set(update)
   },
 
-  setTodayData: (archived, stats, stripFields) => {
-    set({ archivedToday: archived, dayStats: stats, stripFields })
+  setTodayData: (archived, stats, stripFields, showPassingVisitors) => {
+    set({ archivedToday: archived, dayStats: stats, stripFields, showPassingVisitors })
   },
 
   setConnected: (connected) => set({ connected }),

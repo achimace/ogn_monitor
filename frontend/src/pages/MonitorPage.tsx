@@ -25,6 +25,7 @@ export default function MonitorPage() {
   const getCombinedFlights = useMonitorStore((s) => s.getCombinedFlights)
   const dayStats = useMonitorStore((s) => s.dayStats)
   const stripFields = useMonitorStore((s) => s.stripFields)
+  const showPassingVisitors = useMonitorStore((s) => s.showPassingVisitors)
   // Subscribe to flights + archivedToday so combined list is reactive
   useMonitorStore((s) => s.flights)
   useMonitorStore((s) => s.archivedToday)
@@ -51,6 +52,13 @@ export default function MonitorPage() {
   }, [])
 
   const allFlights = getCombinedFlights()
+  // Airfield setting "Vorbeifliegende Luftfahrzeuge in Liste anzeigen": when
+  // off, visitors are left out of the list until they have landed (or
+  // touched down) here. The map keeps showing them (airspace picture).
+  const listFlights = showPassingVisitors
+    ? allFlights
+    : allFlights.filter((f) => !(f.isVisitor && f.status !== 'landing'
+                                 && (f.landingCount ?? 1) <= 1))
 
   function switchView(mode: ViewMode) {
     setView(mode)
@@ -111,7 +119,7 @@ export default function MonitorPage() {
 
         {view === 'table' && (
           <div className="flex-1 overflow-auto px-4 pb-12">
-            <FlightTable flights={allFlights} onSelect={setSelectedFlight} stripFields={stripFields} />
+            <FlightTable flights={listFlights} onSelect={setSelectedFlight} stripFields={stripFields} />
           </div>
         )}
 
@@ -133,7 +141,7 @@ export default function MonitorPage() {
             <div className="w-1/2 overflow-auto">
               {/* Row click focuses the map; the drawer opens via "Details". */}
               <FlightTable
-                flights={allFlights}
+                flights={listFlights}
                 onFocus={(f) => setFocusFlarmId(f.flarmId)}
                 onDetails={setSelectedFlight}
                 focusedFlarmId={focusFlarmId ?? undefined}

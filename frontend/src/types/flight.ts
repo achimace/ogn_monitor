@@ -72,6 +72,8 @@ export interface AirfieldFields {
   landingType?: LandingType | string
   /** True when the aircraft took off elsewhere and arrived at this airfield */
   isVisitor?: boolean
+  /** Landings of this flight (starts at 1; > 1 after a touch & go) */
+  landingCount?: number
 }
 
 /** The four alarm-handling fields carried by hot-state flights (all optional). */

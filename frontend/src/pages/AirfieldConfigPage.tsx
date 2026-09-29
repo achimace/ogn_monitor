@@ -27,6 +27,7 @@ interface Airfield {
   home_polygon: GeoJsonPolygon | null
   landed_visible_minutes: number
   monitor_strip_fields: string[]
+  show_passing_visitors: boolean
 }
 
 const ALL_STRIP_FIELDS: { id: string; label: string }[] = [
@@ -66,6 +67,7 @@ const EMPTY_FORM: AirfieldForm = {
   home_polygon: null,
   landed_visible_minutes: 1440,
   monitor_strip_fields: ALL_STRIP_FIELDS.map(f => f.id),
+  show_passing_visitors: true,
 }
 
 export default function AirfieldConfigPage() {
@@ -114,6 +116,7 @@ export default function AirfieldConfigPage() {
       home_polygon: af.home_polygon ?? null,
       landed_visible_minutes: af.landed_visible_minutes ?? 1440,
       monitor_strip_fields: af.monitor_strip_fields ?? ALL_STRIP_FIELDS.map(f => f.id),
+      show_passing_visitors: af.show_passing_visitors ?? true,
     })
     setTowPlaneInput((af.tow_plane_flarm_ids || []).join(', '))
     setError('')
@@ -151,6 +154,7 @@ export default function AirfieldConfigPage() {
       home_polygon: form.home_polygon,
       landed_visible_minutes: form.landed_visible_minutes,
       monitor_strip_fields: form.monitor_strip_fields,
+      show_passing_visitors: form.show_passing_visitors,
     }
   }
 
@@ -376,6 +380,21 @@ export default function AirfieldConfigPage() {
               </div>
               <p className="text-xs text-gray-500 mt-2">
                 Kennzeichen und Status werden immer angezeigt.
+              </p>
+            </div>
+            <div className="mt-4">
+              <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={form.show_passing_visitors}
+                  onChange={e => setField('show_passing_visitors', e.target.checked)}
+                  className="w-4 h-4 accent-tower-qdr"
+                />
+                Vorbeifliegende Luftfahrzeuge in Liste anzeigen
+              </label>
+              <p className="text-xs text-gray-500 mt-1">
+                Besucher, die nicht hier gestartet sind und in der Umgebung fliegen.
+                Ausgeschaltet erscheinen sie erst, wenn sie hier gelandet sind.
               </p>
             </div>
           </fieldset>
