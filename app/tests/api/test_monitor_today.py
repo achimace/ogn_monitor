@@ -47,6 +47,7 @@ class FakeDb:
     def __init__(self):
         self.rows: list[dict] = []
         self.fetch_calls: list[tuple[str, tuple]] = []
+        self.show_passing_visitors = True
 
     async def fetchrow(self, sql: str, *args):
         assert "FROM airfields" in sql
@@ -54,7 +55,8 @@ class FakeDb:
             return None
         return {"id": AIRFIELD_ID, "slug": SLUG, "latitude": 47.6, "longitude": 11.2,
                 "elevation_m": 660, "landed_visible_minutes": 120,
-                "monitor_strip_fields": ["registration"]}
+                "monitor_strip_fields": ["registration"],
+                "show_passing_visitors": self.show_passing_visitors}
 
     async def fetch(self, sql: str, *args):
         assert "FROM flight_log" in sql
@@ -146,3 +148,50 @@ async def test_live_entry_wins_over_archived_and_keeps_redis_encoding(client, fa
 async def test_unknown_airfield_is_404(client):
     r = await client.get("/api/monitor/nope/today")
     assert r.status_code == 404
+
+
+def _live_visitors(fake_redis) -> None:
+    """One airborne visitor, one visitor landed here, one home flight (all live)."""
+    fake_redis.sets[f"flights:{SLUG}"] = {"VISAIR", "VISLND", "VISTNG", "HOME01"}
+    fake_redis.hashes[f"flight:{SLUG}:VISAIR"] = {
+        "flarm_id": "VISAIR", "status": "2", "takeoff_time": "",
+        "takeoff_airfield": "unbekannt", "is_visitor": "1",
+    }
+    fake_redis.hashes[f"flight:{SLUG}:VISLND"] = {
+        "flarm_id": "VISLND", "status": "3", "takeoff_time": "",
+        "landing_time": "2026-09-29T12:00:00Z", "takeoff_airfield": "unbekannt",
+        "is_visitor": "1",
+    }
+    # Touch & go here: airborne again, but already landed on our runway
+    fake_redis.hashes[f"flight:{SLUG}:VISTNG"] = {
+        "flarm_id": "VISTNG", "status": "2", "takeoff_time": "",
+        "takeoff_airfield": "unbekannt", "is_visitor": "1", "landing_count": "2",
+    }
+    fake_redis.hashes[f"flight:{SLUG}:HOME01"] = {
+        "flarm_id": "HOME01", "status": "2", "takeoff_time": "2026-09-29T11:00:00Z",
+        "takeoff_airfield": "Heimat", "is_visitor": "0",
+    }
+
+
+async def test_passing_visitors_shown_by_default(client, fake_redis):
+    _live_visitors(fake_redis)
+    r = await client.get(f"/api/monitor/{SLUG}/today")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["show_passing_visitors"] is True
+    assert {f["flarmId"] for f in body["flights"]} == {"VISAIR", "VISLND", "VISTNG", "HOME01"}
+    assert body["day_stats"]["in_air"] == 3
+
+
+async def test_passing_visitors_hidden_when_switched_off(client, fake_redis, fake_db):
+    _live_visitors(fake_redis)
+    fake_db.show_passing_visitors = False
+    r = await client.get(f"/api/monitor/{SLUG}/today")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["config"]["show_passing_visitors"] is False
+    # The airborne visitor is gone (list and stats); visitors that landed
+    # or touched down here stay like any other flight.
+    assert {f["flarmId"] for f in body["flights"]} == {"VISLND", "VISTNG", "HOME01"}
+    assert body["day_stats"]["in_air"] == 2
+    assert body["day_stats"]["landed_today"] == 1

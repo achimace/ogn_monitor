@@ -140,7 +140,7 @@ async def get_today(slug: str):
     # 1. Resolve airfield
     row = await db.fetchrow(
         "SELECT id, slug, latitude, longitude, elevation_m, "
-        "landed_visible_minutes, monitor_strip_fields "
+        "landed_visible_minutes, monitor_strip_fields, show_passing_visitors "
         "FROM airfields WHERE slug = $1 AND is_active = TRUE",
         slug,
     )
@@ -149,6 +149,8 @@ async def get_today(slug: str):
     airfield_id = row["id"]
     strip_fields = list(row["monitor_strip_fields"] or [])
     landed_visible_minutes = int(row["landed_visible_minutes"] or 1440)
+    # Only an explicit FALSE hides visitors (default TRUE, migration 013)
+    show_passing_visitors = row.get("show_passing_visitors") is not False
 
     # 2. Active flights from Redis (full hot-state picture)
     flights_by_fid: dict[str, dict] = {}
@@ -212,6 +214,10 @@ async def get_today(slug: str):
         }
 
     flights = list(flights_by_fid.values())
+    if not show_passing_visitors:
+        # Airborne visitors are hidden on this airfield's monitor (list and
+        # day stats); a visitor that landed here counts like any landing.
+        flights = [f for f in flights if not _is_passing_visitor(f)]
     # Sort by max(landing_time, takeoff_time) desc
     flights.sort(
         key=lambda f: (f.get("landingTime") or f.get("takeoffTime") or ""),
@@ -258,6 +264,7 @@ async def get_today(slug: str):
         "config": {
             "strip_fields": strip_fields,
             "landed_visible_minutes": landed_visible_minutes,
+            "show_passing_visitors": show_passing_visitors,
         },
     }
 
@@ -659,6 +666,20 @@ def _iso(ts) -> str:
     if hasattr(ts, "strftime"):
         return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
     return str(ts)
+
+
+def _is_passing_visitor(flight: dict) -> bool:
+    """Visitor (did not start here) that has not landed here yet.
+
+    Landed here = status LANDING ("3") or a touch & go on our runway
+    (landing_count starts at 1, a touch & go increments it).
+    """
+    if flight.get("isVisitor") != "1" or str(flight.get("status", "")) == "3":
+        return False
+    try:
+        return int(float(flight.get("landingCount") or 1)) <= 1
+    except (TypeError, ValueError):
+        return True
 
 
 def _utcnow_iso() -> str:

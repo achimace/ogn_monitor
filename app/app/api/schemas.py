@@ -123,6 +123,8 @@ class AirfieldCreateRequest(BaseModel):
     winch_vs_threshold_ms: float = Field(8.0, ge=3.0, le=15.0)
     landed_visible_minutes: int = Field(1440, ge=1, le=10080)  # 1min..7d
     monitor_strip_fields: list[str] = Field(default_factory=list)
+    # List airborne visitors (is_visitor) on the monitor; display only
+    show_passing_visitors: bool = True
     home_polygon: dict | None = None
 
     @field_validator("home_polygon")
@@ -149,6 +151,7 @@ class AirfieldUpdateRequest(BaseModel):
     is_active: bool = True
     landed_visible_minutes: int = Field(1440, ge=1, le=10080)
     monitor_strip_fields: list[str] = Field(default_factory=list)
+    show_passing_visitors: bool = True
     home_polygon: dict | None = None
 
     @field_validator("home_polygon")
@@ -177,6 +180,7 @@ class AirfieldResponse(BaseModel):
     is_active: bool
     landed_visible_minutes: int = 1440
     monitor_strip_fields: list[str] = Field(default_factory=list)
+    show_passing_visitors: bool = True
     created_at: datetime | None = None
     updated_at: datetime | None = None
     home_polygon: dict | None = None

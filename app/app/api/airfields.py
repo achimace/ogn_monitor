@@ -66,6 +66,7 @@ async def create_airfield(
             json.dumps(body.home_polygon) if body.home_polygon else None,
             body.landed_visible_minutes,
             body.monitor_strip_fields,
+            body.show_passing_visitors,
         )
     except Exception as e:
         if "unique" in str(e).lower():
@@ -106,6 +107,7 @@ async def update_airfield(
             json.dumps(body.home_polygon) if body.home_polygon else None,
             body.landed_visible_minutes,
             body.monitor_strip_fields,
+            body.show_passing_visitors,
         )
     except Exception as e:
         if "unique" in str(e).lower():

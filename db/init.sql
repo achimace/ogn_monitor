@@ -54,6 +54,7 @@ CREATE TABLE airfields (
         'duration','launch_type','qdr','distance','altitude','agl',
         'speed','vs','track'
     ],
+    show_passing_visitors   BOOLEAN NOT NULL DEFAULT TRUE, -- list airborne visitors on the monitor
     is_active               BOOLEAN DEFAULT TRUE,
     created_at              TIMESTAMPTZ DEFAULT NOW(),
     updated_at              TIMESTAMPTZ DEFAULT NOW(),
