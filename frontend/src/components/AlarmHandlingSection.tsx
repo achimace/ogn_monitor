@@ -51,7 +51,7 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
   const current = flight.alarmState ?? null
 
   return (
-    <div className="px-4 py-2.5 border-b border-tower-border space-y-2">
+    <div className="px-4 py-2.5 border-b border-tower-border space-y-1.5">
       <div className="flex items-center justify-between gap-3">
         <div className="text-gray-500 text-xs uppercase tracking-wider">Alarm-Bearbeitung</div>
         {current
@@ -81,7 +81,7 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
         </div>
       ) : !airfieldSlug ? null : (
         <>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-1.5">
             {ALARM_STATES.map((s) => (
               <ActionButton
                 key={s}
@@ -102,7 +102,7 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
             placeholder="Kommentar (optional)"
             aria-label="Kommentar zur Alarm-Bearbeitung"
             disabled={submitting}
-            className="w-full bg-tower-bg border border-tower-border rounded-lg px-3 py-1.5 text-sm text-white
+            className="w-full bg-tower-bg border border-tower-border rounded-lg px-3 py-1 text-sm text-white
               placeholder-gray-500 focus:outline-none focus:border-tower-qdr disabled:opacity-50"
           />
 
@@ -110,23 +110,22 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
             <div className="text-red-300 text-xs" role="alert">{submitError}</div>
           )}
 
-          <div>
-            <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Verlauf</div>
-            {historyError && (
-              <div className="text-red-300 text-xs" role="alert">{historyError}</div>
-            )}
-            {!historyError && historyLoading && history.length === 0 && (
-              <div className="text-xs text-gray-500">Lade Verlauf…</div>
-            )}
-            {!historyError && !historyLoading && history.length === 0 && (
-              <div className="text-xs text-gray-500">Noch keine Einträge.</div>
-            )}
-            {history.length > 0 && (
+          {/* History: full heading + list only when there is something to show;
+              otherwise a single compact status line to keep the drawer short. */}
+          {history.length > 0 ? (
+            <div>
+              <div className="text-gray-500 text-xs uppercase tracking-wider mb-1">Verlauf</div>
               <ul className="space-y-1 text-xs">
                 {history.map((item) => <HistoryRow key={item.id} item={item} />)}
               </ul>
-            )}
-          </div>
+            </div>
+          ) : historyError ? (
+            <div className="text-red-300 text-xs" role="alert">Verlauf: {historyError}</div>
+          ) : (
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">
+              Verlauf: {historyLoading ? 'wird geladen…' : 'noch keine Einträge'}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -136,7 +135,8 @@ export default function AlarmHandlingSection({ flight, airfieldSlug }: Props) {
 function ActionButton({ state, active, busy, disabled, onClick }: {
   state: AlarmState; active: boolean; busy: boolean; disabled: boolean; onClick: () => void
 }) {
-  const base = 'rounded-lg px-3 py-1.5 text-sm font-medium border transition-colors disabled:opacity-50 min-h-[40px]'
+  // min-h keeps the tower-friendly touch target despite the compact padding.
+  const base = 'rounded-lg px-3 py-1 text-xs font-medium border transition-colors disabled:opacity-50 min-h-[40px]'
   const look = active
     ? ACTIVE_STYLE[state]
     : 'bg-tower-bg border-tower-border text-gray-200 hover:border-gray-500 hover:text-white'

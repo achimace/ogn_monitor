@@ -117,7 +117,7 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
       {/* Drawer: flex column so the header stays fixed and only the body scrolls */}
       <div
         className="fixed z-50 bg-tower-surface border-tower-border text-white flex flex-col
-          inset-x-0 bottom-0 max-h-[85vh] supports-[height:100dvh]:max-h-[85dvh] rounded-t-2xl border-t
+          inset-x-0 bottom-0 max-h-[92vh] supports-[height:100dvh]:max-h-[92dvh] rounded-t-2xl border-t
           md:inset-y-0 md:right-0 md:left-auto md:bottom-auto md:max-h-none md:max-w-md md:w-full md:rounded-none md:border-l md:border-t-0"
       >
         {/* Mobile drag handle */}
@@ -179,14 +179,14 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
           <Stat label="Kurs" value={`${flight.trackDeg}°`} color="text-gray-200" />
         </div>
 
-        {/* Timeline */}
-        <div className="px-4 py-2.5 space-y-1 text-sm border-b border-tower-border">
+        {/* Timeline: two columns to keep the drawer short even with all rows */}
+        <div className="px-4 py-2.5 grid grid-cols-2 gap-x-6 gap-y-1 text-sm border-b border-tower-border">
           <Row label="Start" value={takeoff} />
-          <Row label="Startplatz" value={takeoffAirfield} mono={false} />
           {landing && <Row label="Landung" value={landing} />}
+          <Row label="Startplatz" value={takeoffAirfield} mono={false} />
           {landed && <Row label="Landeplatz" value={landingAirfield} mono={false} />}
           {duration && <Row label="Dauer" value={duration} />}
-          {flight.launchType && <Row label="Startart" value={launchLabel(flight.launchType)} />}
+          {flight.launchType && <Row label="Startart" value={launchLabel(flight.launchType)} mono={false} />}
           {flight.maxAltitudeM > 0 && <Row label="Max. Höhe" value={`${flight.maxAltitudeM} m`} />}
           {flight.maxDistanceM > 0 && <Row label="Max. Distanz" value={`${(flight.maxDistanceM / 1000).toFixed(1)} km`} />}
         </div>
@@ -227,18 +227,13 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
             <button
               onClick={handleDismiss}
               disabled={dismissing}
+              title="Archiviert ins Flugbuch und blendet bei allen Monitoren aus."
               className="w-full bg-red-900/40 hover:bg-red-900/60 border border-red-700/50
                 text-red-200 text-sm font-medium rounded-lg px-4 py-2
                 transition-colors disabled:opacity-50"
             >
               {dismissing ? 'Wird entfernt...' : 'Aus Liste entfernen'}
             </button>
-            <p
-              title="Archiviert ins Flugbuch und blendet bei allen Monitoren aus."
-              className="text-[10px] leading-tight text-gray-600 text-center whitespace-nowrap overflow-hidden text-ellipsis"
-            >
-              Archiviert ins Flugbuch und blendet bei allen Monitoren aus.
-            </p>
 
             {!showIgnoreForm ? (
               <button
@@ -249,42 +244,48 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
                 Nicht mehr beobachten
               </button>
             ) : (
-              <div className="bg-tower-bg border border-tower-border rounded-lg p-3 space-y-2">
-                <p className="text-xs text-gray-400">
-                  Setzt das Flugzeug auf die Ausschlussliste – es wird an diesem
-                  Flugplatz nicht mehr beobachtet.
+              <div className="bg-tower-bg border border-tower-border rounded-lg p-2 space-y-1.5">
+                <p
+                  title="Setzt das Flugzeug auf die Ausschlussliste – es wird an diesem Flugplatz nicht mehr beobachtet."
+                  className="text-[10px] leading-tight text-gray-400 whitespace-nowrap overflow-hidden text-ellipsis"
+                >
+                  Setzt das Flugzeug auf die Ausschlussliste dieses Flugplatzes.
                 </p>
                 {ignoreError && (
                   <div className="text-red-300 text-xs">{ignoreError}</div>
                 )}
-                <input
-                  type="text"
-                  value={ignoreNote}
-                  onChange={(e) => setIgnoreNote(e.target.value.slice(0, 120))}
-                  placeholder="Rettungshubschrauber Klinik"
-                  required
-                  maxLength={120}
-                  autoFocus
-                  className="w-full bg-tower-surface border border-tower-border rounded-lg
-                    px-3 py-2 text-sm text-white placeholder-gray-600
-                    focus:outline-none focus:border-tower-qdr"
-                  aria-label="Hinweis"
-                />
                 <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={ignoreNote}
+                    onChange={(e) => setIgnoreNote(e.target.value.slice(0, 120))}
+                    placeholder="Rettungshubschrauber Klinik"
+                    required
+                    maxLength={120}
+                    autoFocus
+                    className="flex-1 min-w-0 bg-tower-surface border border-tower-border rounded-lg
+                      px-3 py-2 text-sm text-white placeholder-gray-600
+                      focus:outline-none focus:border-tower-qdr"
+                    aria-label="Hinweis"
+                  />
                   <button
                     onClick={handleIgnore}
                     disabled={ignoring || !ignoreNote.trim()}
-                    className="flex-1 bg-tower-qdr hover:bg-cyan-500 text-white text-sm
-                      font-semibold rounded-lg px-4 py-2 transition-colors disabled:opacity-50"
+                    className="shrink-0 bg-tower-qdr hover:bg-cyan-500 text-white text-sm
+                      font-semibold rounded-lg px-3 py-2 transition-colors disabled:opacity-50"
                   >
-                    {ignoring ? 'Wird gespeichert...' : 'Bestätigen'}
+                    {ignoring ? 'Speichert…' : 'Bestätigen'}
                   </button>
                   <button
                     onClick={() => { setShowIgnoreForm(false); setIgnoreNote(''); setIgnoreError('') }}
                     disabled={ignoring}
-                    className="text-gray-400 hover:text-white text-sm px-3 py-2 disabled:opacity-50"
+                    aria-label="Abbrechen"
+                    title="Abbrechen"
+                    className="shrink-0 text-gray-400 hover:text-white text-xl leading-none
+                      px-2.5 py-2 min-w-[40px] rounded-lg border border-tower-border
+                      disabled:opacity-50"
                   >
-                    Abbrechen
+                    ×
                   </button>
                 </div>
               </div>
@@ -309,10 +310,17 @@ function Stat({ label, value, hint, color }: { label: string; value: string; hin
 }
 
 function Row({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
+  // Long values (airfield names, "Außenlandung") must not wrap in the
+  // two-column grid – ellipsize and expose the full text as a tooltip.
   return (
-    <div className="flex justify-between gap-4">
+    <div className="flex justify-between gap-2 min-w-0">
       <span className="text-gray-500 shrink-0">{label}</span>
-      <span className={`text-gray-100 text-right ${mono ? 'font-mono' : ''}`}>{value}</span>
+      <span
+        className={`text-gray-100 text-right truncate min-w-0 ${mono ? 'font-mono' : ''}`}
+        title={value}
+      >
+        {value}
+      </span>
     </div>
   )
 }
