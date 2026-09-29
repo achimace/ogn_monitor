@@ -158,10 +158,9 @@ function FlightRow({ flight, bgColor, handlers, show }: {
   const isOutlanded = flight.landingType === 'outlanding'
   const landingField = flight.landingAirfield || (isOutlanded ? 'Außenlandung' : '—')
 
-  // Landing at a known foreign airfield: badge stays "LDG", the field name
-  // goes underneath (desktop) or into the meta line (mobile).
+  // Landing at a known foreign airfield: badge stays "LDG"; the field name
+  // is shown by the airfield pair of the landed strip.
   const foreignLanding = isForeignLanding(flight)
-  const foreignField = foreignLanding ? (flight.landingAirfield || 'fremder Platz') : ''
   const badgeStatus: Flight['status'] = foreignLanding ? 'landing' : flight.status
   // Visitor: took off elsewhere and arrived here.
   const visitorHint = flight.isVisitor
@@ -213,9 +212,6 @@ function FlightRow({ flight, bgColor, handlers, show }: {
               {[
                 show('takeoff_time') && takeoffStr ? `Start ${takeoffStr}` : '',
                 show('landing_time') && landingStr ? `Landung ${landingStr}` : '',
-                // Landed strips show the landing field in the airfield pair
-                // below – no need to repeat it in the meta line.
-                foreignField && !landedStrip ? `in ${foreignField}` : '',
                 show('duration') && durationStr,
                 show('launch_type') && launchLabel,
                 show('aircraft_model') && flight.aircraftModel,
@@ -383,7 +379,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
             button (split view only) stacked underneath so the row keeps its
             width. */}
         <div className="w-20 shrink-0 flex flex-col items-center gap-1">
-          <StatusBadge status={badgeStatus} elapsedMinutes={elapsedMin} sublabel={foreignField || undefined} />
+          <StatusBadge status={badgeStatus} elapsedMinutes={elapsedMin} />
           {alarmStateBadge}
           {detailsButton}
         </div>
