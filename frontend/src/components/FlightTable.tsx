@@ -12,6 +12,7 @@ import AlarmStateBadge from './AlarmStateBadge'
 import ClimbIndicator from './ClimbIndicator'
 import type { StripField } from '../store/monitorStore'
 import { ALL_STRIP_FIELDS } from '../store/monitorStore'
+import { flightMinutes } from '../lib/flightTime'
 
 interface FlightTableProps {
   flights: Flight[]
@@ -521,24 +522,20 @@ function formatHM(iso: string | null): string {
   return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
 }
 
+/** Flight time so far / total (minute arithmetic, see lib/flightTime). */
 function computeDurationShort(f: Flight): string {
-  if (!f.takeoffTime) return ''
-  const start = new Date(f.takeoffTime).getTime()
-  const end = f.landingTime ? new Date(f.landingTime).getTime() : Date.now()
-  if (!isFinite(start) || !isFinite(end) || end <= start) return ''
-  const sec = Math.floor((end - start) / 1000)
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
+  const min = flightMinutes(f)
+  if (min === null) return ''
+  const h = Math.floor(min / 60)
+  const m = min % 60
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}h` : `${m}min`
 }
 
 /** Flight duration for landed strips: "05 min", "1:05 h" ('' if unknown). */
 function formatDurationLanded(f: Flight): string {
-  if (!f.takeoffTime || !f.landingTime) return ''
-  const start = new Date(f.takeoffTime).getTime()
-  const end = new Date(f.landingTime).getTime()
-  if (!isFinite(start) || !isFinite(end) || end <= start) return ''
-  const min = Math.floor((end - start) / 60000)
+  if (!f.landingTime) return ''
+  const min = flightMinutes(f)
+  if (min === null) return ''
   const h = Math.floor(min / 60)
   const m = String(min % 60).padStart(2, '0')
   return h > 0 ? `${h}:${m} h` : `${m} min`

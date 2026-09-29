@@ -10,6 +10,7 @@ import { api, ApiError } from '../api/client'
 import { useAuth } from '../hooks/useAuth'
 import AlarmHandlingSection from './AlarmHandlingSection'
 import { isAlarmHandlingRelevant } from '../lib/alarmHandling'
+import { flightMinutes } from '../lib/flightTime'
 
 interface Props {
   flight: Flight | null
@@ -313,14 +314,12 @@ function formatTime(iso: string | null): string {
   })
 }
 
+/** Flight time (minute arithmetic, matches the HH:MM times shown). */
 function computeDuration(f: Flight): string {
-  if (!f.takeoffTime) return ''
-  const start = new Date(f.takeoffTime).getTime()
-  const end = f.landingTime ? new Date(f.landingTime).getTime() : Date.now()
-  if (!isFinite(start) || !isFinite(end) || end <= start) return ''
-  const sec = Math.floor((end - start) / 1000)
-  const h = Math.floor(sec / 3600)
-  const m = Math.floor((sec % 3600) / 60)
+  const min = flightMinutes(f)
+  if (min === null) return ''
+  const h = Math.floor(min / 60)
+  const m = min % 60
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}h` : `${m} min`
 }
 
