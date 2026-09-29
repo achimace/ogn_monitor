@@ -8,6 +8,7 @@ import ExclusionListPage from './pages/ExclusionListPage'
 import FlightLogPage from './pages/FlightLogPage'
 import VfSyncPage from './pages/VfSyncPage'
 import MonitorPage from './pages/MonitorPage'
+import MonitorErrorBoundary from './components/MonitorErrorBoundary'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -19,7 +20,10 @@ function App() {
           {/* Public routes */}
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
-          <Route path="/monitor/:slug" element={<MonitorPage />} />
+          <Route
+            path="/monitor/:slug"
+            element={<MonitorErrorBoundary><MonitorPage /></MonitorErrorBoundary>}
+          />
 
           {/* Protected routes with dashboard layout */}
           <Route element={<ProtectedRoute />}>
