@@ -49,6 +49,12 @@ class FakeDb:
             row = {"id": uuid4(), "flarm_id": flarm_id, "note": note, "created_at": NOW}
             self.rows[key] = row
             return row
+        if sql.lstrip().startswith("UPDATE airfield_ignored_aircraft"):
+            row = self.rows.get((args[0], args[1]))
+            if row is None:
+                return None
+            row["note"] = args[2]
+            return row
         if sql.lstrip().startswith("DELETE FROM airfield_ignored_aircraft"):
             row = self.rows.pop((args[0], args[1]), None)
             return {"id": row["id"]} if row else None
@@ -139,6 +145,34 @@ async def test_post_without_note(client):
     assert resp.json()["note"] is None
 
 
+async def test_put_updates_note(client, fake_db):
+    await client.post(BASE, json={"flarm_id": "DDA5BA", "note": "alt"})
+    resp = await client.put(f"{BASE}/DDA5BA", json={"note": " Rettungsheli Murnau "})
+    assert resp.status_code == 200, resp.text
+    item = resp.json()
+    assert item["flarmId"] == "DDA5BA"
+    assert item["note"] == "Rettungsheli Murnau"
+    assert set(item) == {"id", "flarmId", "note", "createdAt"}
+    assert fake_db.rows[(AIRFIELD_ID, "DDA5BA")]["note"] == "Rettungsheli Murnau"
+
+
+@pytest.mark.parametrize("body", [{"note": None}, {"note": "  "}, {}])
+async def test_put_clears_note(client, fake_db, body):
+    await client.post(BASE, json={"flarm_id": "DDA5BA", "note": "alt"})
+    resp = await client.put(f"{BASE}/DDA5BA", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["note"] is None
+    assert fake_db.rows[(AIRFIELD_ID, "DDA5BA")]["note"] is None
+
+
+async def test_put_uppercases_flarm_id_in_path(client, fake_db):
+    await client.post(BASE, json={"flarm_id": "DDA5BA"})
+    resp = await client.put(f"{BASE}/dda5ba", json={"note": "neu"})
+    assert resp.status_code == 200
+    assert resp.json()["flarmId"] == "DDA5BA"
+    assert fake_db.rows[(AIRFIELD_ID, "DDA5BA")]["note"] == "neu"
+
+
 async def test_delete_removes_item_case_insensitively(client, fake_db):
     await client.post(BASE, json={"flarm_id": "DDA5BA"})
     resp = await client.delete(f"{BASE}/dda5ba")
@@ -163,6 +197,12 @@ async def test_delete_unknown_is_404(client):
     assert resp.status_code == 404
 
 
+async def test_put_unknown_is_404(client):
+    resp = await client.put(f"{BASE}/ABCDEF", json={"note": "x"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "FLARM-ID nicht auf der Ignorierliste"
+
+
 @pytest.mark.parametrize("body", [
     {"flarm_id": "ZZZZ"},          # not hex
     {"flarm_id": "ABC"},           # too short
@@ -178,6 +218,7 @@ async def test_invalid_body_is_422(client, body):
 async def test_unauthenticated_is_401(anon_client, fake_db):
     assert (await anon_client.get(BASE)).status_code == 401
     assert (await anon_client.post(BASE, json={"flarm_id": "DDA5BA"})).status_code == 401
+    assert (await anon_client.put(f"{BASE}/DDA5BA", json={"note": "x"})).status_code == 401
     assert (await anon_client.delete(f"{BASE}/DDA5BA")).status_code == 401
     assert fake_db.rows == {}
 
@@ -186,6 +227,7 @@ async def test_foreign_tenant_airfield_is_403(client, fake_db):
     base = f"/api/airfields/{FOREIGN_AIRFIELD_ID}/ignored-aircraft"
     assert (await client.get(base)).status_code == 403
     assert (await client.post(base, json={"flarm_id": "DDA5BA"})).status_code == 403
+    assert (await client.put(f"{base}/DDA5BA", json={"note": "x"})).status_code == 403
     assert (await client.delete(f"{base}/DDA5BA")).status_code == 403
     assert fake_db.rows == {}
 
@@ -194,6 +236,7 @@ async def test_unknown_airfield_is_404(client):
     base = f"/api/airfields/{uuid4()}/ignored-aircraft"
     assert (await client.get(base)).status_code == 404
     assert (await client.post(base, json={"flarm_id": "DDA5BA"})).status_code == 404
+    assert (await client.put(f"{base}/DDA5BA", json={"note": "x"})).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +248,13 @@ async def test_post_and_delete_publish_airfield_slug(client, fake_redis):
     await client.delete(f"{BASE}/DDA5BA")
     assert fake_redis.published == [(TRACKER_CONFIG_CHANNEL, "ohlstadt")] * 2
     assert TRACKER_CONFIG_CHANNEL == "tracker:config"
+
+
+async def test_put_does_not_publish(client, fake_redis):
+    await client.post(BASE, json={"flarm_id": "DDA5BA"})
+    assert (await client.put(f"{BASE}/DDA5BA", json={"note": "neu"})).status_code == 200
+    # only the POST publishes - a note change does not alter the ignored set
+    assert fake_redis.published == [(TRACKER_CONFIG_CHANNEL, "ohlstadt")]
 
 
 async def test_failed_requests_do_not_publish(client, fake_redis):

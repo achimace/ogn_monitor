@@ -301,6 +301,19 @@ class IgnoredAircraftCreateRequest(BaseModel):
         return v or None
 
 
+class IgnoredAircraftUpdateRequest(BaseModel):
+    """PUT /api/airfields/{id}/ignored-aircraft/{flarm_id} body (snake_case)."""
+    note: str | None = Field(None, max_length=120)
+
+    @field_validator("note")
+    @classmethod
+    def _strip_note(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
 class IgnoredAircraftItem(_CamelModel):
     """One row of airfield_ignored_aircraft (camelCase on the wire)."""
     id: UUID

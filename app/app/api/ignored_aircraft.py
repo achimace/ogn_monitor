@@ -11,6 +11,7 @@ Routes (auth + tenant ownership like the aircraft routes):
 
 - ``GET    /api/airfields/{airfield_id}/ignored-aircraft``            -> [{id, flarmId, note, createdAt}]
 - ``POST   /api/airfields/{airfield_id}/ignored-aircraft``            -> 201 item (409 duplicate)
+- ``PUT    /api/airfields/{airfield_id}/ignored-aircraft/{flarm_id}`` -> item (404 unknown)
 - ``DELETE /api/airfields/{airfield_id}/ignored-aircraft/{flarm_id}`` -> 204 (404 unknown)
 """
 
@@ -21,7 +22,11 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.airfields import _verify_airfield_ownership
-from app.api.schemas import IgnoredAircraftCreateRequest, IgnoredAircraftItem
+from app.api.schemas import (
+    IgnoredAircraftCreateRequest,
+    IgnoredAircraftItem,
+    IgnoredAircraftUpdateRequest,
+)
 from app.db import queries as q
 from app.db.connection import get_db
 from app.dependencies import get_current_user
@@ -87,6 +92,26 @@ async def add_ignored_aircraft(
         )
     log.info("ignored_aircraft_added", airfield_id=str(airfield_id), flarm_id=body.flarm_id)
     await publish_tracker_config_changed(redis, airfield["slug"])
+    return dict(row)
+
+
+@router.put("/{flarm_id}", response_model=IgnoredAircraftItem)
+async def update_ignored_aircraft(
+    airfield_id: UUID,
+    flarm_id: str,
+    body: IgnoredAircraftUpdateRequest,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Update the note of an ignored FLARM-ID (404 if not on the list)."""
+    await _verify_airfield_ownership(airfield_id, user["tenant_id"])
+    row = await get_db().fetchrow(
+        q.IGNORED_AIRCRAFT_UPDATE, airfield_id, flarm_id.upper(), body.note
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="FLARM-ID nicht auf der Ignorierliste")
+    log.info("ignored_aircraft_updated", airfield_id=str(airfield_id), flarm_id=flarm_id.upper())
+    # No tracker:config signal: the set of ignored FLARM-IDs is unchanged,
+    # only the note differs - the worker does not need to reload.
     return dict(row)
 
 

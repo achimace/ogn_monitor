@@ -179,6 +179,12 @@ IGNORED_AIRCRAFT_DELETE = """
     RETURNING id
 """
 
+IGNORED_AIRCRAFT_UPDATE = """
+    UPDATE airfield_ignored_aircraft SET note = $3
+    WHERE airfield_id = $1 AND flarm_id = $2
+    RETURNING id, flarm_id, note, created_at
+"""
+
 AIRCRAFT_UPSERT = """
     INSERT INTO tenant_aircraft (airfield_id, flarm_id, registration, competition_sign, aircraft_model, aircraft_type)
     VALUES ($1, $2, $3, $4, $5, $6)
