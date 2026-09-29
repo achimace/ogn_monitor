@@ -27,41 +27,15 @@ from app.api.schemas import (
     IgnoredAircraftItem,
     IgnoredAircraftUpdateRequest,
 )
+from app.api.tracker_signal import publish_tracker_config_changed, redis_client
 from app.db import queries as q
 from app.db.connection import get_db
 from app.dependencies import get_current_user
-from app.redis_client import get_redis
-from app.tracking.redis_keys import TRACKER_CONFIG_CHANNEL
 
 log = structlog.get_logger()
 router = APIRouter(
     prefix="/api/airfields/{airfield_id}/ignored-aircraft", tags=["ignored-aircraft"]
 )
-
-
-def redis_client() -> Any:
-    """Redis client of the API process; None when not initialized (tests)."""
-    try:
-        return get_redis()
-    except RuntimeError:
-        return None
-
-
-async def publish_tracker_config_changed(redis: Any, slug: str) -> bool:
-    """Tell the APRS worker to reload its airfield configs right away.
-
-    Best effort: without Redis or on a Redis error the DB write stays
-    valid - the worker picks the change up with its periodic reload.
-    Returns True if the message was published.
-    """
-    if redis is None:
-        return False
-    try:
-        await redis.publish(TRACKER_CONFIG_CHANNEL, slug)
-    except Exception as exc:  # noqa: BLE001 - never fail the write
-        log.warning("tracker_config_signal_failed", slug=slug, error=type(exc).__name__)
-        return False
-    return True
 
 
 @router.get("", response_model=list[IgnoredAircraftItem])

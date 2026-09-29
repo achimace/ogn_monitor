@@ -1,7 +1,15 @@
-"""Aircraft API - CRUD for tenant aircraft + CSV import."""
+"""Aircraft API - CRUD for tenant aircraft + CSV import.
+
+After every successful write the airfield slug is published on
+``tracker:config`` (best effort, see ``app.api.tracker_signal``): the
+worker reloads its aircraft cache within seconds, so a newly entered
+aircraft shows up with its registration immediately instead of after
+the next hourly cache reload.
+"""
 
 import csv
 import io
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -16,6 +24,7 @@ from app.api.schemas import (
     CsvImportResponse,
 )
 from app.api.airfields import _verify_airfield_ownership
+from app.api.tracker_signal import publish_tracker_config_changed, redis_client
 from app.dependencies import get_current_user
 
 log = structlog.get_logger()
@@ -36,9 +45,10 @@ async def create_aircraft(
     airfield_id: UUID,
     body: AircraftCreateRequest,
     user: dict = Depends(get_current_user),
+    redis: Any = Depends(redis_client),
 ):
     """Add an aircraft to the airfield fleet."""
-    await _verify_airfield_ownership(airfield_id, user["tenant_id"])
+    airfield = await _verify_airfield_ownership(airfield_id, user["tenant_id"])
     pool = get_db()
 
     # Check if FLARM ID already exists for this airfield
@@ -52,6 +62,7 @@ async def create_aircraft(
         body.competition_sign, body.aircraft_model, body.aircraft_type,
     )
     log.info("aircraft_added", airfield_id=str(airfield_id), flarm_id=body.flarm_id)
+    await publish_tracker_config_changed(redis, airfield["slug"])
     return dict(row)
 
 
@@ -61,9 +72,10 @@ async def update_aircraft(
     flarm_id: str,
     body: AircraftUpdateRequest,
     user: dict = Depends(get_current_user),
+    redis: Any = Depends(redis_client),
 ):
     """Update an aircraft."""
-    await _verify_airfield_ownership(airfield_id, user["tenant_id"])
+    airfield = await _verify_airfield_ownership(airfield_id, user["tenant_id"])
     pool = get_db()
 
     row = await pool.fetchrow(
@@ -76,6 +88,7 @@ async def update_aircraft(
         raise HTTPException(status_code=404, detail="Flugzeug nicht gefunden")
 
     log.info("aircraft_updated", airfield_id=str(airfield_id), flarm_id=flarm_id)
+    await publish_tracker_config_changed(redis, airfield["slug"])
     return dict(row)
 
 
@@ -84,14 +97,16 @@ async def delete_aircraft(
     airfield_id: UUID,
     flarm_id: str,
     user: dict = Depends(get_current_user),
+    redis: Any = Depends(redis_client),
 ):
     """Remove an aircraft from the airfield fleet."""
-    await _verify_airfield_ownership(airfield_id, user["tenant_id"])
+    airfield = await _verify_airfield_ownership(airfield_id, user["tenant_id"])
     pool = get_db()
     result = await pool.execute(q.AIRCRAFT_DELETE, airfield_id, flarm_id.upper())
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Flugzeug nicht gefunden")
     log.info("aircraft_deleted", airfield_id=str(airfield_id), flarm_id=flarm_id)
+    await publish_tracker_config_changed(redis, airfield["slug"])
 
 
 @router.post("/import-csv", response_model=CsvImportResponse)
@@ -99,6 +114,7 @@ async def import_csv(
     airfield_id: UUID,
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user),
+    redis: Any = Depends(redis_client),
 ):
     """Import aircraft from CSV file.
 
@@ -108,7 +124,7 @@ async def import_csv(
     Minimum required columns: flarm_id, registration
     Uses UPSERT - existing FLARM IDs are updated.
     """
-    await _verify_airfield_ownership(airfield_id, user["tenant_id"])
+    airfield = await _verify_airfield_ownership(airfield_id, user["tenant_id"])
 
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Nur CSV-Dateien erlaubt")
@@ -179,4 +195,6 @@ async def import_csv(
             skipped += 1
 
     log.info("csv_imported", airfield_id=str(airfield_id), imported=imported, skipped=skipped)
+    if imported:
+        await publish_tracker_config_changed(redis, airfield["slug"])
     return CsvImportResponse(imported=imported, skipped=skipped, errors=errors)

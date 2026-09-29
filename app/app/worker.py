@@ -381,8 +381,9 @@ async def main():
         ))
 
         # Airfield config reload: periodic (every 5 min) and on demand via
-        # the tracker:config channel (API ignore-list changes). Both paths
-        # share one function and a lock so they never interleave.
+        # the tracker:config channel (API ignore-list and tenant-aircraft
+        # changes). Both paths share one function and a lock so they never
+        # interleave.
         reload_lock = asyncio.Lock()
 
         async def reload_configs() -> None:
@@ -432,10 +433,32 @@ async def main():
             name="config_reload",
         ))
 
-        # Immediate reload on API signal (best effort; the periodic loop
-        # is the fallback when Redis PubSub is unavailable)
+        # Immediate reload on API signal (best effort; the periodic loops
+        # are the fallback when Redis PubSub is unavailable). The signal
+        # also reloads the aircraft cache: aircraft changes (POST/PUT/
+        # DELETE/CSV import) take effect within seconds instead of after
+        # the hourly resolver reload. Both steps are independent - one
+        # failure never skips the other - and the aircraft load runs
+        # under the same lock as the config reload so signal and periodic
+        # reloads never interleave (load() swaps the cache in <0.5 s, the
+        # double reload on ignore-list changes is acceptable).
+        async def reload_configs_and_aircraft() -> None:
+            try:
+                await reload_configs()
+            except Exception:
+                log.exception("tracker_config_airfield_reload_failed")
+            try:
+                async with reload_lock:
+                    await aircraft_resolver.load()
+                log.info(
+                    "aircraft_cache_reloaded_on_signal",
+                    size=aircraft_resolver.cache_size,
+                )
+            except Exception:
+                log.exception("aircraft_cache_signal_reload_failed")
+
         tasks.append(asyncio.create_task(
-            tracker_config_listener(redis, reload_configs),
+            tracker_config_listener(redis, reload_configs_and_aircraft),
             name="config_listener",
         ))
 
