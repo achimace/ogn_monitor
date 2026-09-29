@@ -238,7 +238,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
           </div>
         </div>
         {landedStrip ? (
-          <div className="grid grid-cols-3 gap-3">
+          <div className={`grid ${show('duration') ? 'grid-cols-3' : 'grid-cols-2'} gap-3`}>
             <LandedTimeBlock label="Start" time={show('takeoff_time') ? takeoffStr : undefined}
               timeClass="text-sky-400" airfield={takeoffField} mobile />
             <LandedTimeBlock label="Landung" time={show('landing_time') ? landingStr : undefined}
@@ -294,8 +294,8 @@ function FlightRow({ flight, bgColor, handlers, show }: {
           launch type muted, status badge on the right. Live data (QDR,
           distance, altitude) is stale once landed and not shown. */}
       {landedStrip && (
-      <div className={`hidden md:flex items-center ${dense ? 'px-4 py-3 gap-3' : 'px-5 py-4 gap-6'}`}>
-        <div className={`${dense ? 'w-28' : 'w-44'} shrink-0 min-w-0`}>
+      <div className={`hidden md:flex items-center ${dense ? 'px-4 py-3 gap-3' : 'px-5 py-4 gap-4 lg:gap-6'}`}>
+        <div className={`${dense ? 'w-24 xl:w-28' : 'w-32 lg:w-44'} shrink-0 min-w-0`}>
           <div className="text-white font-bold text-lg leading-tight truncate">
             {flight.registration || flight.flarmId}
             {show('competition_sign') && flight.competitionSign && (
@@ -324,7 +324,7 @@ function FlightRow({ flight, bgColor, handlers, show }: {
         )}
 
         {show('launch_type') && !(dense && show('duration')) && (
-          <div className={`${dense ? 'w-20 text-sm' : 'w-32 text-lg'} min-w-0 shrink text-gray-400 truncate`}
+          <div className={`${dense ? 'w-20 text-sm' : 'w-24 lg:w-32 text-base lg:text-lg'} min-w-0 shrink text-gray-400 truncate`}
             title={launchLabel || undefined}>
             {launchLabel}
           </div>
@@ -463,8 +463,14 @@ function LandedTimeBlock({ label, time, timeClass, airfield, outlanding, muted, 
   dense?: boolean
   mobile?: boolean
 }) {
-  const box = mobile ? 'min-w-0' : dense ? 'flex-1 min-w-[6.5rem]' : 'w-48 min-w-[8.5rem] shrink'
-  const timeSize = mobile ? 'text-xl' : dense ? 'text-2xl' : 'text-tower-xl'
+  // Min widths fit the widest time ("05 min" / "2:05 h") at the chosen font
+  // size, so a row fits a split half of a 1024px screen / a 768px table.
+  const box = mobile
+    ? 'min-w-0'
+    : dense
+      ? 'flex-1 min-w-[4.5rem] xl:min-w-[5.5rem]'
+      : 'w-48 min-w-[6rem] lg:min-w-[8.5rem] shrink'
+  const timeSize = mobile ? 'text-xl' : dense ? 'text-xl xl:text-2xl' : 'text-2xl lg:text-tower-xl'
   return (
     <div className={box}>
       <div className={`text-gray-500 uppercase tracking-wider ${mobile ? 'text-[10px]' : 'text-xs'}`}>
