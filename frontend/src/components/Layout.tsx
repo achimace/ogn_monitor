@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { path: '/dashboard', label: 'Dashboard', icon: '\u25A3' },
   { path: '/dashboard/airfield', label: 'Flugplatz', icon: '\u2708' },
   { path: '/dashboard/aircraft', label: 'Flugzeuge', icon: '\u2693' },
+  { path: '/dashboard/exclusion', label: 'Ausschlussliste', icon: '\u2298' },
   { path: '/dashboard/log', label: 'Flugbuch', icon: '\u2261' },
   { path: '/dashboard/vfsync', label: 'Vereinsflieger', icon: '\u21c4' },
 ]

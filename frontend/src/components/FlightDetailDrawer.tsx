@@ -21,6 +21,17 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
   const { isAuthenticated } = useAuth()
   const [dismissing, setDismissing] = useState(false)
   const [dismissError, setDismissError] = useState('')
+  // "Nicht mehr beobachten" (exclusion list): inline form state
+  const [showIgnoreForm, setShowIgnoreForm] = useState(false)
+  const [ignoreNote, setIgnoreNote] = useState('')
+  const [ignoring, setIgnoring] = useState(false)
+  const [ignoreError, setIgnoreError] = useState('')
+  // Reset the inline form whenever a different flight is opened
+  useEffect(() => {
+    setShowIgnoreForm(false)
+    setIgnoreNote('')
+    setIgnoreError('')
+  }, [flight?.flarmId])
   useEffect(() => {
     if (!flight) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -47,6 +58,42 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
       setDismissError(e instanceof ApiError ? e.message : 'Entfernen fehlgeschlagen')
     } finally {
       setDismissing(false)
+    }
+  }
+
+  /** Put the aircraft on the per-airfield exclusion list (ignored-aircraft).
+   *  The worker drops its beacons and removes it from the live view itself. */
+  async function handleIgnore() {
+    if (!flight || !airfieldSlug) return
+    const note = ignoreNote.trim()
+    if (!note) {
+      setIgnoreError('Bitte einen Hinweis angeben')
+      return
+    }
+    setIgnoring(true)
+    setIgnoreError('')
+    try {
+      // No fallback: on a foreign club's monitor the slug matches none of the
+      // tenant's own airfields, and the entry must not land on the wrong list.
+      const airfields = await api.get<{ id: string; slug: string }[]>('/airfields')
+      const airfield = airfields.find((af) => af.slug === airfieldSlug)
+      if (!airfield) {
+        setIgnoreError('Kein Zugriff auf diesen Flugplatz')
+        return
+      }
+      await api.post(`/airfields/${airfield.id}/ignored-aircraft`, {
+        flarm_id: flight.flarmId,
+        note,
+      })
+      onClose()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setIgnoreError('Steht bereits auf der Ausschlussliste')
+      } else {
+        setIgnoreError(e instanceof ApiError ? e.message : 'Speichern fehlgeschlagen')
+      }
+    } finally {
+      setIgnoring(false)
     }
   }
 
@@ -182,6 +229,56 @@ export default function FlightDetailDrawer({ flight, airfieldSlug, onClose }: Pr
             <p className="text-[10px] text-gray-600 text-center">
               Archiviert ins Flugbuch und blendet bei allen Monitoren aus.
             </p>
+
+            {!showIgnoreForm ? (
+              <button
+                onClick={() => { setShowIgnoreForm(true); setIgnoreError('') }}
+                className="w-full bg-tower-bg hover:bg-white/10 border border-tower-border
+                  text-gray-300 text-sm font-medium rounded-lg px-4 py-2.5 transition-colors"
+              >
+                Nicht mehr beobachten
+              </button>
+            ) : (
+              <div className="bg-tower-bg border border-tower-border rounded-lg p-3 space-y-2">
+                <p className="text-xs text-gray-400">
+                  Setzt das Flugzeug auf die Ausschlussliste – es wird an diesem
+                  Flugplatz nicht mehr beobachtet.
+                </p>
+                {ignoreError && (
+                  <div className="text-red-300 text-xs">{ignoreError}</div>
+                )}
+                <input
+                  type="text"
+                  value={ignoreNote}
+                  onChange={(e) => setIgnoreNote(e.target.value.slice(0, 120))}
+                  placeholder="Rettungshubschrauber Klinik"
+                  required
+                  maxLength={120}
+                  autoFocus
+                  className="w-full bg-tower-surface border border-tower-border rounded-lg
+                    px-3 py-2 text-sm text-white placeholder-gray-600
+                    focus:outline-none focus:border-tower-qdr"
+                  aria-label="Hinweis"
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleIgnore}
+                    disabled={ignoring || !ignoreNote.trim()}
+                    className="flex-1 bg-tower-qdr hover:bg-cyan-500 text-white text-sm
+                      font-semibold rounded-lg px-4 py-2 transition-colors disabled:opacity-50"
+                  >
+                    {ignoring ? 'Wird gespeichert...' : 'Bestätigen'}
+                  </button>
+                  <button
+                    onClick={() => { setShowIgnoreForm(false); setIgnoreNote(''); setIgnoreError('') }}
+                    disabled={ignoring}
+                    className="text-gray-400 hover:text-white text-sm px-3 py-2 disabled:opacity-50"
+                  >
+                    Abbrechen
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

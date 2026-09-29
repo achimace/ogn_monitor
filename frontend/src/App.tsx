@@ -4,6 +4,7 @@ import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import AirfieldConfigPage from './pages/AirfieldConfigPage'
 import AircraftManagePage from './pages/AircraftManagePage'
+import ExclusionListPage from './pages/ExclusionListPage'
 import FlightLogPage from './pages/FlightLogPage'
 import VfSyncPage from './pages/VfSyncPage'
 import MonitorPage from './pages/MonitorPage'
@@ -26,6 +27,7 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/dashboard/airfield" element={<AirfieldConfigPage />} />
               <Route path="/dashboard/aircraft" element={<AircraftManagePage />} />
+              <Route path="/dashboard/exclusion" element={<ExclusionListPage />} />
               <Route path="/dashboard/log" element={<FlightLogPage />} />
               <Route path="/dashboard/vfsync" element={<VfSyncPage />} />
             </Route>
